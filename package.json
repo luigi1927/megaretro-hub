@@ -1,0 +1,19 @@
+{
+  "name": "megaretro-hub",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "node --test server/tests",
+    "start": "node server/src/main.js",
+    "desktop": "node server/src/main.js --app",
+    "test:coverage": "node --test --experimental-test-coverage server/tests"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module"
+}

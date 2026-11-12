@@ -1,0 +1,9 @@
+node_modules/
+client/node_modules/
+client/dist/
+games/*
+!games/.gitkeep
+emulators/*
+!emulators/.gitkeep
+*.log
+.env
