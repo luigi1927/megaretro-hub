@@ -1,9 +1,24 @@
+@"
 node_modules/
 client/node_modules/
+server/node_modules/
 client/dist/
+client/.angular/
 games/*
 !games/.gitkeep
 emulators/*
 !emulators/.gitkeep
-*.log
-.env
+server/catalog.json
+*.exe
+*.dll
+*.bin
+*.cue
+*.iso
+*.chd
+*.7z
+*.zip
+.DS_Store
+Thumbs.db
+"@ | Set-Content -Path .gitignore -Encoding UTF8
+
+New-Item -ItemType File -Path games\.gitkeep, emulators\.gitkeep -Force | Out-Null

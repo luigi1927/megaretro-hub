@@ -1,0 +1,135 @@
+<div class="hub-shell">
+  <!-- Barra superior -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo-dot"></span>
+      <h1>MEGARETRO <span>HUB</span></h1>
+    </div>
+
+    <nav class="console-tabs">
+      @for (sys of launcher.systems(); track sys) {
+        <button
+          [class.active]="launcher.selectedSystem() === sys"
+          (click)="selectSystem(sys)">
+          {{ sys === 'ALL' ? 'TODOS' : sys }}
+        </button>
+      }
+    </nav>
+
+    <div class="controls-bar">
+      <button class="btn-get-roms" (click)="launcher.scanDownloadsFolder()">
+  🔍 Escanear Descargas
+</button>
+      <button class="btn-get-roms" (click)="launcher.showGetGamesModal.set(true)">
+        🌐 Obtener Juegos
+      </button>
+
+      <input
+        type="search"
+        placeholder="Buscar juego..."
+        (input)="onSearch($event)" />
+
+      <div class="pad-badge" [class.connected]="gamepad.connectedGamepad()">
+        {{ gamepad.connectedGamepad() ? '🎮 Mando Activo' : '⌨️ Teclado / Ratón' }}
+      </div>
+    </div>
+  </header>
+
+  <!-- Banner de radar activo esperando descarga -->
+  @if (launcher.radarActive()) {
+    <div class="radar-banner">
+      <span class="pulse-ring"></span>
+      <div>
+        <strong>Radar de Descargas Activo ({{ launcher.radarSystem() || 'Todas las consolas' }})</strong>
+        <small>Descarga cualquier .zip o ROM en tu navegador; se instalará aquí automáticamente.</small>
+      </div>
+      <button (click)="launcher.stopRadar()">Detener</button>
+    </div>
+  }
+
+  <!-- Banner de importación en curso -->
+  @if (launcher.importingStatus()) {
+    <div class="radar-banner importing">
+      <div class="mini-spinner"></div>
+      <strong>{{ launcher.importingStatus() }}</strong>
+    </div>
+  }
+
+  <!-- Estado vacío inicial -->
+  @if (launcher.filteredGames().length === 0) {
+    <section class="empty-state">
+      <h2>Tu biblioteca está lista para estrenarse</h2>
+      <p>Haz clic en <strong>"Obtener Juegos"</strong>, elige una consola y descarga tu primera ROM.</p>
+      <button class="btn-get-roms" (click)="launcher.showGetGamesModal.set(true)">
+        ➕ Descargar mi primer juego
+      </button>
+    </section>
+  }
+
+  <!-- Cuadrícula de carátulas -->
+  <main class="games-grid">
+    @for (game of launcher.filteredGames(); track game.id; let i = $index) {
+      <article
+        class="game-card"
+        [class.focused]="focusedIndex() === i"
+        (mouseenter)="focusedIndex.set(i)"
+        (click)="launcher.playOrDownload(game)">
+
+        <div class="cover-wrapper">
+          <img [src]="game.coverUrl" [alt]="game.title" loading="lazy" />
+          <span class="system-tag">{{ game.system }}</span>
+
+          @if (game.installed) {
+            <span class="status-badge installed">▶ JUGAR</span>
+          } @else {
+            <span class="status-badge cloud">NUBE • {{ game.sizeMB }} MB</span>
+          }
+
+          @if (game.downloading || game.extracting) {
+            <div class="progress-overlay">
+              <p>{{ game.extracting ? 'Extrayendo ROM...' : 'Descargando ' + game.progress + '%' }}</p>
+              <div class="bar-track">
+                <div class="bar-fill" [style.width.%]="game.progress || 0"></div>
+              </div>
+            </div>
+          }
+        </div>
+
+        <div class="card-footer">
+          <div class="meta">
+            <h3>{{ game.title }}</h3>
+            <small>{{ game.year }} • {{ game.sizeMB }} MB</small>
+          </div>
+
+          @if (game.installed) {
+            <button
+              class="btn-delete"
+              title="Eliminar ROM del disco (Tecla Supr / Botón X)"
+              (click)="$event.stopPropagation(); launcher.uninstallGame(game)">
+              ✕
+            </button>
+          }
+        </div>
+      </article>
+    }
+  </main>
+
+  <!-- Asistente modal para elegir consola -->
+  <app-download-wizard />
+
+  <!-- Pantalla de bloqueo mientras el emulador está abierto -->
+  @if (launcher.activeGameTitle()) {
+    <div class="playing-modal">
+      <div class="modal-box">
+        <div class="spinner"></div>
+        <h2>Ejecutando {{ launcher.activeGameTitle() }}</h2>
+        <p>Cierra el emulador para volver automáticamente al menú.</p>
+      </div>
+    </div>
+  }
+
+  <!-- Notificaciones -->
+  @if (launcher.toastMessage()) {
+    <div class="toast">{{ launcher.toastMessage() }}</div>
+  }
+</div>
