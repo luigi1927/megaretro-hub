@@ -246,6 +246,83 @@ function publishEvent(payload) {
     }
 }
 
+// --- Autoconfiguración de Ventana y Controles ---
+async function ensureRetroArchAutoControls(retroarchDir) {
+    const cfgPath = path.join(retroarchDir, 'retroarch.cfg');
+    const coreOptDir = path.join(retroarchDir, 'config', 'SwanStation');
+    const coreOptPath = path.join(coreOptDir, 'SwanStation.opt');
+
+    const autoSettings = {
+        // Modo ventana redimensionable (sin pantalla completa automática)
+        video_fullscreen: '"false"',
+        video_windowed_fullscreen: '"false"',
+        video_window_show_decorations: '"true"',
+        video_window_save_positions: '"true"',
+        video_window_custom_size_enable: '"false"',
+        video_scale: '"3"',
+        // Controles: Mandos USB/Bluetooth + Teclado y Ratón
+        input_driver: '"dinput"',
+        input_joypad_driver: '"xinput"',
+        input_autodetect_enable: '"true"',
+        joypad_autoconfig_dir: '":\\autoconfig"',
+        input_auto_mouse_grab: '"false"',
+        input_grab_mouse_toggle: '"f11"',
+        auto_remaps_enable: '"true"',
+        // Clics del ratón mapeados a los botones principales
+        input_player1_b_mbtn: '"1"',      // Clic Izquierdo -> Cruz / B (Saltar / Confirmar)
+        input_player1_y_mbtn: '"2"',      // Clic Derecho -> Cuadrado / Y (Atacar / Acción)
+        input_player1_x_mbtn: '"3"',      // Clic Central -> Triángulo / X
+        input_player1_a_mbtn: '"4"',      // Botón lateral 1 -> Círculo / A
+        // Teclado ergonómico (Flechas + Q/E para cámara L1/R1)
+        input_player1_up: '"up"',
+        input_player1_down: '"down"',
+        input_player1_left: '"left"',
+        input_player1_right: '"right"',
+        input_player1_l: '"q"',
+        input_player1_r: '"e"',
+        input_player1_start: '"enter"',
+        input_player1_select: '"rshift"',
+        // Atajo universal para salir y volver a MegaRetro Hub
+        input_exit_emulator: '"escape"',
+        input_enable_hotkey_btn: '"6"',
+        input_exit_emulator_btn: '"7"'
+    };
+
+    let content = '';
+    if (fs.existsSync(cfgPath)) {
+        content = await fsp.readFile(cfgPath, 'utf-8');
+    }
+
+    for (const [key, value] of Object.entries(autoSettings)) {
+        const regex = new RegExp(`^${key}\\s*=.*$`, 'm');
+        if (regex.test(content)) {
+            content = content.replace(regex, `${key} = ${value}`);
+        } else {
+            content += `\n${key} = ${value}`;
+        }
+    }
+
+    await fsp.writeFile(cfgPath, content.trim() + '\n', 'utf-8');
+
+    // SwanStation (PS1): Mando DualShock automático
+    await fsp.mkdir(coreOptDir, { recursive: true });
+    let optContent = fs.existsSync(coreOptPath) ? await fsp.readFile(coreOptPath, 'utf-8') : '';
+    const ps1Opts = {
+        duckstation_Controller1_Type: '"AnalogController"',
+        duckstation_Controller1_ForceAnalogOnReset: '"true"'
+    };
+
+    for (const [key, value] of Object.entries(ps1Opts)) {
+        const regex = new RegExp(`^${key}\\s*=.*$`, 'm');
+        if (regex.test(optContent)) {
+            optContent = optContent.replace(regex, `${key} = ${value}`);
+        } else {
+            optContent += `\n${key} = ${value}`;
+        }
+    }
+    await fsp.writeFile(coreOptPath, optContent.trim() + '\n', 'utf-8');
+}
+
 // --- Ejecución de Emulador ---
 let activeEmulatorProcess = null;
 
@@ -275,15 +352,17 @@ async function launchGameById(gameId) {
         if (!fs.existsSync(corePath)) {
             throw new Error(`Falta el núcleo ${game.core} en emulators/retroarch/cores/`);
         }
+
+        await ensureRetroArchAutoControls(cwd);
         args = ['-L', corePath, romPath];
     } else if (game.emulator === 'pcsx2') {
         cwd = resolveInside(EMULATORS_DIR, 'pcsx2');
         bin = resolveInside(cwd, 'pcsx2-qt.exe');
-        args = ['-batch', '-fullscreen', romPath];
+        args = ['-batch', romPath];
     } else if (game.emulator === 'dolphin') {
         cwd = resolveInside(EMULATORS_DIR, 'dolphin');
         bin = resolveInside(cwd, 'Dolphin.exe');
-        args = ['-b', '-e', romPath];
+        args = ['-e', romPath];
     } else {
         throw new Error(`Emulador no soportado: ${game.emulator}`);
     }
@@ -345,7 +424,7 @@ async function extractArchiveSafely(archivePath, destDir) {
     });
 }
 
-async function importDownloadedFile(sourcePath) {
+async function importDownloadedFile(sourcePath, silentIfNoRom = false) {
     if (activeImports.has(sourcePath)) return;
     activeImports.add(sourcePath);
 
@@ -381,7 +460,9 @@ async function importDownloadedFile(sourcePath) {
         const extLower = path.extname(filename).toLowerCase();
         const isArchive = ARCHIVE_EXTS.includes(extLower);
 
-        publishEvent({ type: 'IMPORT_STARTED', message: `Extrayendo e instalando "${filename}"...` });
+        if (!silentIfNoRom) {
+            publishEvent({ type: 'IMPORT_STARTED', message: `Extrayendo e instalando "${filename}"...` });
+        }
         await fsp.mkdir(stagingDir, { recursive: true });
 
         if (isArchive) {
@@ -455,7 +536,9 @@ async function importDownloadedFile(sourcePath) {
 
         publishEvent({ type: 'GAME_IMPORTED', game: { ...savedGame, installed: true } });
     } catch (err) {
-        publishEvent({ type: 'ERROR_TOAST', message: err.message });
+        if (!silentIfNoRom || !err.message.includes('no contiene una ROM compatible')) {
+            publishEvent({ type: 'ERROR_TOAST', message: err.message });
+        }
     } finally {
         activeImports.delete(sourcePath);
         await fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => { });
@@ -474,7 +557,7 @@ function startDownloadsRadar() {
 
         const fullPath = path.join(DOWNLOADS_DIR, filename);
         if (fs.existsSync(fullPath)) {
-            importDownloadedFile(fullPath);
+            importDownloadedFile(fullPath, false);
         }
     });
 }
@@ -609,7 +692,6 @@ const server = http.createServer(async (req, res) => {
     const pathname = urlObj.pathname;
 
     try {
-        // 1. Stream SSE
         if (req.method === 'GET' && pathname === '/api/events') {
             if (shutdownTimer) {
                 clearTimeout(shutdownTimer);
@@ -638,13 +720,11 @@ const server = http.createServer(async (req, res) => {
             return;
         }
 
-        // 2. Catálogo sincronizado con el disco
         if (req.method === 'GET' && pathname === '/api/catalog') {
             const games = await syncGamesFromDisk();
             return sendJson(req, res, 200, games);
         }
 
-        // 3. Fuentes de descarga (server/sources.json)
         if (req.method === 'GET' && pathname === '/api/sources') {
             try {
                 const raw = await fsp.readFile(SOURCES_PATH, 'utf-8');
@@ -654,14 +734,12 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
-        // 4. Iniciar juego
         if (req.method === 'POST' && pathname.startsWith('/api/play/')) {
             const gameId = decodeURIComponent(pathname.replace('/api/play/', ''));
             const result = await launchGameById(gameId);
             return sendJson(req, res, 200, result);
         }
 
-        // 5. Desinstalar juego
         if (req.method === 'DELETE' && pathname.startsWith('/api/game/')) {
             const gameId = decodeURIComponent(pathname.replace('/api/game/', ''));
             await deleteGameFromCatalog(gameId);
@@ -669,7 +747,6 @@ const server = http.createServer(async (req, res) => {
             return sendJson(req, res, 200, { deleted: true });
         }
 
-        // 6. Activar radar y abrir portal web
         if (req.method === 'POST' && pathname === '/api/radar/start') {
             const { system, url } = await readBody(req);
             expectedSystem = system || null;
@@ -679,7 +756,6 @@ const server = http.createServer(async (req, res) => {
             return sendJson(req, res, 200, { active: true, system: expectedSystem });
         }
 
-        // 7. Detener radar
         if (req.method === 'POST' && pathname === '/api/radar/stop') {
             expectedSystem = null;
             radarActive = false;
@@ -687,7 +763,6 @@ const server = http.createServer(async (req, res) => {
             return sendJson(req, res, 200, { active: false });
         }
 
-        // 8. Escanear carpeta Descargas
         if (req.method === 'POST' && pathname === '/api/radar/scan') {
             if (!fs.existsSync(DOWNLOADS_DIR)) {
                 return sendJson(req, res, 200, { found: 0 });
@@ -701,7 +776,7 @@ const server = http.createServer(async (req, res) => {
                 const st = await fsp.stat(fullPath).catch(() => null);
                 if (st && st.isFile()) {
                     found++;
-                    importDownloadedFile(fullPath);
+                    importDownloadedFile(fullPath, true);
                 }
             }
             return sendJson(req, res, 200, { found });

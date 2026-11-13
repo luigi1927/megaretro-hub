@@ -1,4 +1,4 @@
-import { Component, inject, signal, HostListener, OnInit } from '@angular/core';
+import { Component, inject, signal, effect, HostListener } from '@angular/core';
 import { LauncherService } from './core/services/launcher.service';
 import { GamepadService, GamepadAction } from './core/services/gamepad.service';
 import { DownloadWizardComponent } from './features/launcher/components/download-wizard.component';
@@ -10,13 +10,26 @@ import { DownloadWizardComponent } from './features/launcher/components/download
   templateUrl: './app.html',
   styleUrl: './app.css'
 })
-export class App implements OnInit {
+export class App {
   readonly launcher = inject(LauncherService);
   readonly gamepad = inject(GamepadService);
   readonly focusedIndex = signal<number>(0);
 
-  ngOnInit(): void {
-    this.gamepad.onAction((action) => this.handleNavigation(action));
+  constructor() {
+    // Reacciona automáticamente a cualquier botón/dirección del mando USB o Bluetooth
+    effect(() => {
+      const ev = this.gamepad.lastAction();
+      if (!ev) return;
+      this.handleNavigationAction(ev.action);
+    });
+
+    // Reinicia el cursor a 0 si cambia el filtro de consola o búsqueda y queda fuera de rango
+    effect(() => {
+      const total = this.launcher.filteredGames().length;
+      if (this.focusedIndex() >= total) {
+        this.focusedIndex.set(Math.max(0, total - 1));
+      }
+    });
   }
 
   selectSystem(sys: string): void {
@@ -24,68 +37,72 @@ export class App implements OnInit {
     this.focusedIndex.set(0);
   }
 
-  onSearch(event: Event): void {
-    const val = (event.target as HTMLInputElement).value;
+  onSearch(val: string): void {
     this.launcher.searchQuery.set(val);
     this.focusedIndex.set(0);
   }
 
   @HostListener('window:keydown', ['$event'])
-  onKeyDown(e: KeyboardEvent): void {
-    if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'SELECT') {
+  onKeyDown(event: KeyboardEvent): void {
+    const tag = (event.target as HTMLElement)?.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+
+    if (event.key === 'Escape' && this.launcher.showGetGamesModal()) {
+      this.launcher.showGetGamesModal.set(false);
       return;
     }
 
-    const map: Record<string, GamepadAction> = {
-      ArrowUp: 'UP',
-      ArrowDown: 'DOWN',
+    const keyMap: Record<string, GamepadAction> = {
       ArrowLeft: 'LEFT',
       ArrowRight: 'RIGHT',
+      ArrowUp: 'UP',
+      ArrowDown: 'DOWN',
       Enter: 'CONFIRM',
-      Delete: 'DELETE',
-      q: 'PREV_TAB',
-      e: 'NEXT_TAB'
+      Escape: 'BACK',
+      Delete: 'DELETE'
     };
 
-    if (map[e.key]) {
-      e.preventDefault();
-      this.handleNavigation(map[e.key]);
+    const action = keyMap[event.key];
+    if (action) {
+      event.preventDefault();
+      this.handleNavigationAction(action);
     }
   }
 
-  private handleNavigation(action: GamepadAction): void {
-    if (this.launcher.showGetGamesModal()) return;
+  private handleNavigationAction(action: GamepadAction): void {
+    // Si el modal de "Obtener Juegos" está abierto, el botón B / Atrás lo cierra
+    if (this.launcher.showGetGamesModal()) {
+      if (action === 'BACK') {
+        this.launcher.showGetGamesModal.set(false);
+      }
+      return;
+    }
+
+    // No navegar si ya hay un emulador ejecutándose en pantalla completa
+    if (this.launcher.activeGameTitle()) return;
 
     const games = this.launcher.filteredGames();
     const systems = this.launcher.systems();
 
-    if (action === 'PREV_TAB' || action === 'NEXT_TAB') {
+    // Cambiar de pestaña de consola con Arriba / Abajo
+    if ((action === 'UP' || action === 'DOWN') && systems.length > 1) {
       const idx = systems.indexOf(this.launcher.selectedSystem());
-      const next =
-        action === 'NEXT_TAB'
-          ? (idx + 1) % systems.length
-          : (idx - 1 + systems.length) % systems.length;
-      this.selectSystem(systems[next]);
+      const step = action === 'DOWN' ? 1 : -1;
+      const nextIdx = (idx + step + systems.length) % systems.length;
+      this.selectSystem(systems[nextIdx]);
       return;
     }
 
-    if (!games.length) return;
+    if (games.length === 0) return;
 
-    const current = this.focusedIndex();
-    const columns = 4;
+    const current = Math.min(this.focusedIndex(), games.length - 1);
 
     switch (action) {
-      case 'RIGHT':
-        this.focusedIndex.set(Math.min(games.length - 1, current + 1));
-        break;
       case 'LEFT':
-        this.focusedIndex.set(Math.max(0, current - 1));
+        this.focusedIndex.set(current > 0 ? current - 1 : games.length - 1);
         break;
-      case 'DOWN':
-        this.focusedIndex.set(Math.min(games.length - 1, current + columns));
-        break;
-      case 'UP':
-        this.focusedIndex.set(Math.max(0, current - columns));
+      case 'RIGHT':
+        this.focusedIndex.set(current < games.length - 1 ? current + 1 : 0);
         break;
       case 'CONFIRM':
         this.launcher.playOrDownload(games[current]);

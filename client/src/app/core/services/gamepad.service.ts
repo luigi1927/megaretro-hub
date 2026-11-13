@@ -1,69 +1,83 @@
 import { Injectable, signal, OnDestroy, inject, PLATFORM_ID } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
 
-export type GamepadAction =
-  | 'UP'
-  | 'DOWN'
-  | 'LEFT'
-  | 'RIGHT'
-  | 'CONFIRM'
-  | 'DELETE'
-  | 'PREV_TAB'
-  | 'NEXT_TAB';
+export type GamepadAction = 'UP' | 'DOWN' | 'LEFT' | 'RIGHT' | 'CONFIRM' | 'BACK' | 'DELETE';
 
 @Injectable({ providedIn: 'root' })
 export class GamepadService implements OnDestroy {
   private readonly platformId = inject(PLATFORM_ID);
-  readonly connectedGamepad = signal<string | null>(null);
   private rafId: number | null = null;
-  private lastInputTime = 0;
-  private listeners: Array<(action: GamepadAction) => void> = [];
+  private lastActionTime = 0;
+  private readonly repeatDelayMs = 180;
+
+  readonly connected = signal<boolean>(false);
+  readonly controllerName = signal<string | null>(null);
+  readonly lastAction = signal<{ action: GamepadAction; ts: number } | null>(null);
+
+  private readonly onConnect = (e: GamepadEvent) => {
+    this.connected.set(true);
+    this.controllerName.set(this.cleanControllerName(e.gamepad.id));
+    this.startPolling();
+  };
+
+  private readonly onDisconnect = () => {
+    const active = this.getActiveGamepad();
+    if (active) {
+      this.connected.set(true);
+      this.controllerName.set(this.cleanControllerName(active.id));
+    } else {
+      this.connected.set(false);
+      this.controllerName.set(null);
+      this.stopPolling();
+    }
+  };
 
   constructor() {
     if (isPlatformBrowser(this.platformId)) {
-      window.addEventListener('gamepadconnected', (e) => {
-        this.connectedGamepad.set(e.gamepad.id);
-      });
-      window.addEventListener('gamepaddisconnected', () => {
-        this.connectedGamepad.set(null);
-      });
-      this.startPolling();
+      window.addEventListener('gamepadconnected', this.onConnect);
+      window.addEventListener('gamepaddisconnected', this.onDisconnect);
+
+      // Comprobar si ya había un mando encendido antes de abrir la app
+      const existing = this.getActiveGamepad();
+      if (existing) {
+        this.connected.set(true);
+        this.controllerName.set(this.cleanControllerName(existing.id));
+        this.startPolling();
+      }
     }
   }
 
-  onAction(callback: (action: GamepadAction) => void): void {
-    this.listeners.push(callback);
+  private getActiveGamepad(): Gamepad | null {
+    if (!navigator.getGamepads) return null;
+    const pads = navigator.getGamepads();
+    for (const pad of pads) {
+      if (pad && pad.connected) return pad;
+    }
+    return null;
   }
 
-  private emit(action: GamepadAction): void {
-    for (const fn of this.listeners) fn(action);
+  private cleanControllerName(rawId: string): string {
+    return rawId.replace(/\s*\(.*?\)\s*/g, '').trim() || 'Mando conectado';
   }
 
   private startPolling(): void {
-    const loop = (timestamp: number) => {
-      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-      const pad = pads[0];
+    if (this.rafId !== null) return;
 
-      if (pad && timestamp - this.lastInputTime > 180) {
-        const axisX = pad.axes[0] ?? 0;
-        const axisY = pad.axes[1] ?? 0;
+    const loop = (now: number) => {
+      const pad = this.getActiveGamepad();
+      if (!pad) {
+        this.connected.set(false);
+        this.controllerName.set(null);
+        this.rafId = null;
+        return;
+      }
 
-        if (pad.buttons[12]?.pressed || axisY < -0.5) {
-          this.trigger('UP', timestamp);
-        } else if (pad.buttons[13]?.pressed || axisY > 0.5) {
-          this.trigger('DOWN', timestamp);
-        } else if (pad.buttons[14]?.pressed || axisX < -0.5) {
-          this.trigger('LEFT', timestamp);
-        } else if (pad.buttons[15]?.pressed || axisX > 0.5) {
-          this.trigger('RIGHT', timestamp);
-        } else if (pad.buttons[0]?.pressed) {
-          this.trigger('CONFIRM', timestamp);
-        } else if (pad.buttons[2]?.pressed) {
-          this.trigger('DELETE', timestamp);
-        } else if (pad.buttons[4]?.pressed) {
-          this.trigger('PREV_TAB', timestamp);
-        } else if (pad.buttons[5]?.pressed) {
-          this.trigger('NEXT_TAB', timestamp);
+      if (now - this.lastActionTime >= this.repeatDelayMs) {
+        const action = this.readStandardMapping(pad);
+        if (action) {
+          this.lastActionTime = now;
+          this.lastAction.set({ action, ts: now });
+          window.dispatchEvent(new CustomEvent('megaretro:gamepad', { detail: action }));
         }
       }
 
@@ -73,12 +87,34 @@ export class GamepadService implements OnDestroy {
     this.rafId = requestAnimationFrame(loop);
   }
 
-  private trigger(action: GamepadAction, timestamp: number): void {
-    this.lastInputTime = timestamp;
-    this.emit(action);
+  private readStandardMapping(pad: Gamepad): GamepadAction | null {
+    const btn = (idx: number) => Boolean(pad.buttons[idx]?.pressed);
+    const axisX = pad.axes[0] ?? 0;
+    const axisY = pad.axes[1] ?? 0;
+    const deadzone = 0.55;
+
+    if (btn(12) || axisY < -deadzone) return 'UP';
+    if (btn(13) || axisY > deadzone) return 'DOWN';
+    if (btn(14) || axisX < -deadzone) return 'LEFT';
+    if (btn(15) || axisX > deadzone) return 'RIGHT';
+    if (btn(0) || btn(9)) return 'CONFIRM'; // A / Cruz / Start
+    if (btn(1)) return 'BACK';               // B / Círculo
+    if (btn(3)) return 'DELETE';             // Y / Triángulo
+    return null;
+  }
+
+  private stopPolling(): void {
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
   }
 
   ngOnDestroy(): void {
-    if (this.rafId !== null) cancelAnimationFrame(this.rafId);
+    if (isPlatformBrowser(this.platformId)) {
+      window.removeEventListener('gamepadconnected', this.onConnect);
+      window.removeEventListener('gamepaddisconnected', this.onDisconnect);
+      this.stopPolling();
+    }
   }
 }

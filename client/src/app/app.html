@@ -29,9 +29,9 @@
         placeholder="Buscar juego..."
         (input)="onSearch($event)" />
 
-      <div class="pad-badge" [class.connected]="gamepad.connectedGamepad()">
-        {{ gamepad.connectedGamepad() ? '🎮 Mando Activo' : '⌨️ Teclado / Ratón' }}
-      </div>
+    <span class="input-badge" [class.gamepad-active]="gamepad.connected()">
+  {{ gamepad.connected() ? '🎮 ' + gamepad.controllerName() : '⌨️ Teclado / Ratón' }}
+</span>
     </div>
   </header>
 
