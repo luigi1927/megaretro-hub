@@ -246,6 +246,199 @@ function publishEvent(payload) {
     }
 }
 
+// --- Puente Ratón -> Stick Derecho PS1 (Cursor 100% invisible sin parpadeo) ---
+let mouseBridgeProcess = null;
+
+function restoreWindowsCursorNow() {
+    if (process.platform !== 'win32') return;
+    spawn(
+        'powershell.exe',
+        [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            'Add-Type -TypeDefinition \'using System.Runtime.InteropServices; public class C { [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint a, uint b, System.IntPtr c, uint d); }\'; [C]::SystemParametersInfo(0x0057, 0, [System.IntPtr]::Zero, 0)'
+        ],
+        { shell: false, windowsHide: true }
+    );
+}
+
+function stopMouseToRightStickBridge() {
+    if (mouseBridgeProcess) {
+        try {
+            mouseBridgeProcess.kill();
+        } catch { }
+        mouseBridgeProcess = null;
+    }
+    restoreWindowsCursorNow();
+}
+
+function startMouseToRightStickBridge() {
+    if (process.platform !== 'win32') return;
+    stopMouseToRightStickBridge();
+
+    const psScript = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public class MouseRightStickBridge {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X; public int Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT lpPoint);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
+    [DllImport("user32.dll")] static extern uint MapVirtualKey(uint uCode, uint uMapType);
+    [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    [DllImport("user32.dll")] static extern IntPtr CreateCursor(IntPtr hInst, int xHotSpot, int yHotSpot, int nWidth, int nHeight, byte[] pvANDPlane, byte[] pvXORPlane);
+    [DllImport("user32.dll")] static extern bool SetSystemCursor(IntPtr hcur, uint id);
+    [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
+
+    const uint KEYEVENTF_KEYUP = 0x0002;
+    const uint SPI_SETCURSORS = 0x0057;
+    const uint OCR_NORMAL = 32512;
+
+    const byte VK_NUMPAD8 = 0x68; // Stick Derecho Arriba
+    const byte VK_NUMPAD2 = 0x62; // Stick Derecho Abajo
+    const byte VK_NUMPAD4 = 0x64; // Cámara / Stick Derecho Izquierda
+    const byte VK_NUMPAD6 = 0x66; // Cámara / Stick Derecho Derecha
+
+    static bool upHeld = false, downHeld = false, leftHeld = false, rightHeld = false;
+    static bool cursorHidden = false;
+
+    static void SetCursorVisible(bool visible) {
+        if (!visible && !cursorHidden) {
+            byte[] andMask = new byte[128];
+            byte[] xorMask = new byte[128];
+            for (int i = 0; i < 128; i++) { andMask[i] = 0xFF; xorMask[i] = 0x00; }
+            IntPtr blank = CreateCursor(IntPtr.Zero, 0, 0, 32, 32, andMask, xorMask);
+            if (blank != IntPtr.Zero) {
+                SetSystemCursor(blank, OCR_NORMAL);
+                cursorHidden = true;
+            }
+        } else if (visible && cursorHidden) {
+            SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
+            cursorHidden = false;
+        }
+    }
+
+    static void SetKey(byte vk, ref bool held, bool press) {
+        byte scan = (byte)MapVirtualKey(vk, 0);
+        if (press && !held) {
+            keybd_event(vk, scan, 0, UIntPtr.Zero);
+            held = true;
+        } else if (!press && held) {
+            keybd_event(vk, scan, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            held = false;
+        }
+    }
+
+    static void ReleaseAll() {
+        SetKey(VK_NUMPAD8, ref upHeld, false);
+        SetKey(VK_NUMPAD2, ref downHeld, false);
+        SetKey(VK_NUMPAD4, ref leftHeld, false);
+        SetKey(VK_NUMPAD6, ref rightHeld, false);
+    }
+
+    public static void Run() {
+        AppDomain.CurrentDomain.ProcessExit += (s, e) => SetCursorVisible(true);
+        bool toggleOff = false;
+        bool f11WasDown = false;
+        int deadzone = 5;
+        int holdX = 0, holdY = 0;
+        int dirX = 0, dirY = 0;
+
+        while (true) {
+            bool f11Down = (GetAsyncKeyState(0x7A) & 0x8000) != 0; // F11 libera/oculta el ratón
+            if (f11Down && !f11WasDown) toggleOff = !toggleOff;
+            f11WasDown = f11Down;
+
+            IntPtr fg = GetForegroundWindow();
+            StringBuilder sb = new StringBuilder(256);
+            GetWindowText(fg, sb, 256);
+            string title = sb.ToString();
+
+            if (!toggleOff && title.IndexOf("RetroArch", StringComparison.OrdinalIgnoreCase) >= 0) {
+                RECT rect;
+                if (GetWindowRect(fg, out rect)) {
+                    int cx = (rect.Left + rect.Right) / 2;
+                    int cy = (rect.Top + rect.Bottom) / 2;
+                    POINT p;
+                    if (GetCursorPos(out p)) {
+                        // Deja libres los bordes (45px) para mover o redimensionar la ventana
+                        bool insideClient = p.X > rect.Left + 45 && p.X < rect.Right - 45 &&
+                                            p.Y > rect.Top + 55 && p.Y < rect.Bottom - 45;
+                        if (insideClient) {
+                            SetCursorVisible(false);
+                            int dx = p.X - cx;
+                            int dy = p.Y - cy;
+
+                            if (Math.Abs(dx) > deadzone) {
+                                dirX = dx > 0 ? 1 : -1;
+                                holdX = 3;
+                            } else if (holdX > 0) {
+                                holdX--;
+                            } else {
+                                dirX = 0;
+                            }
+
+                            if (Math.Abs(dy) > deadzone) {
+                                dirY = dy > 0 ? 1 : -1;
+                                holdY = 3;
+                            } else if (holdY > 0) {
+                                holdY--;
+                            } else {
+                                dirY = 0;
+                            }
+
+                            SetKey(VK_NUMPAD4, ref leftHeld, dirX > 0);
+                            SetKey(VK_NUMPAD6, ref rightHeld, dirX < 0);
+                            SetKey(VK_NUMPAD8, ref upHeld, dirY < 0);
+                            SetKey(VK_NUMPAD2, ref downHeld, dirY > 0);
+
+                            if (dx != 0 || dy != 0) {
+                                SetCursorPos(cx, cy);
+                            }
+                        } else {
+                            SetCursorVisible(true);
+                            holdX = 0; holdY = 0; dirX = 0; dirY = 0;
+                            ReleaseAll();
+                        }
+                    }
+                }
+            } else {
+                SetCursorVisible(true);
+                holdX = 0; holdY = 0; dirX = 0; dirY = 0;
+                ReleaseAll();
+            }
+            Thread.Sleep(25);
+        }
+    }
+}
+"@
+[MouseRightStickBridge]::Run()
+`;
+
+    mouseBridgeProcess = spawn(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
+        { shell: false, windowsHide: true }
+    );
+
+    mouseBridgeProcess.on('error', () => {
+        mouseBridgeProcess = null;
+    });
+}
+
 // --- Autoconfiguración de Ventana y Controles ---
 async function ensureRetroArchAutoControls(retroarchDir) {
     const cfgPath = path.join(retroarchDir, 'retroarch.cfg');
@@ -253,36 +446,52 @@ async function ensureRetroArchAutoControls(retroarchDir) {
     const coreOptPath = path.join(coreOptDir, 'SwanStation.opt');
 
     const autoSettings = {
-        // Modo ventana redimensionable (sin pantalla completa automática)
+        // Ventana redimensionable
         video_fullscreen: '"false"',
         video_windowed_fullscreen: '"false"',
         video_window_show_decorations: '"true"',
         video_window_save_positions: '"true"',
         video_window_custom_size_enable: '"false"',
         video_scale: '"3"',
-        // Controles: Mandos USB/Bluetooth + Teclado y Ratón
-        input_driver: '"dinput"',
+        // Cursor oculto dentro de RetroArch
+        input_mouse_hide_enable: '"true"',
+        input_auto_mouse_grab: '"false"',
+        // Driver SDL2 y bloqueo de hotkeys accidentales (exige F12 para atajos)
+        input_driver: '"sdl2"',
         input_joypad_driver: '"xinput"',
         input_autodetect_enable: '"true"',
         joypad_autoconfig_dir: '":\\autoconfig"',
-        input_auto_mouse_grab: '"false"',
-        input_grab_mouse_toggle: '"f11"',
         auto_remaps_enable: '"true"',
-        // Clics del ratón mapeados a los botones principales
-        input_player1_b_mbtn: '"1"',      // Clic Izquierdo -> Cruz / B (Saltar / Confirmar)
-        input_player1_y_mbtn: '"2"',      // Clic Derecho -> Cuadrado / Y (Atacar / Acción)
-        input_player1_x_mbtn: '"3"',      // Clic Central -> Triángulo / X
-        input_player1_a_mbtn: '"4"',      // Botón lateral 1 -> Círculo / A
-        // Teclado ergonómico (Flechas + Q/E para cámara L1/R1)
+        input_enable_hotkey: '"f12"',
+        input_pause_toggle: '"p"',
+        input_frame_advance: '"nul"',
+        // Flechas del teclado = Stick Izquierdo + Cruceta (movimiento del personaje)
+        input_player1_l_y_minus: '"up"',
+        input_player1_l_y_plus: '"down"',
+        input_player1_l_x_minus: '"left"',
+        input_player1_l_x_plus: '"right"',
         input_player1_up: '"up"',
         input_player1_down: '"down"',
         input_player1_left: '"left"',
         input_player1_right: '"right"',
+        // Movimiento del ratón (Keypad 8/2/4/6) -> Stick Derecho (Arriba/Abajo/Izquierda/Derecha) + L2/R2
+        input_player1_r_y_minus: '"keypad8"',
+        input_player1_r_y_plus: '"keypad2"',
+        input_player1_r_x_minus: '"keypad4"',
+        input_player1_r_x_plus: '"keypad6"',
+        input_player1_l2: '"keypad4"',
+        input_player1_r2: '"keypad6"',
+        // L1 y R1 libres en Q y E (para agacharse/planear y fijar objetivo sin que los active el ratón)
         input_player1_l: '"q"',
         input_player1_r: '"e"',
+        // Clics del ratón = Botones principales
+        input_player1_b_mbtn: '"1"',      // Clic Izquierdo -> Cruz / Saltar / Confirmar
+        input_player1_y_mbtn: '"2"',      // Clic Derecho -> Cuadrado / Atacar
+        input_player1_x_mbtn: '"3"',      // Clic Central -> Triángulo (Vista libre)
+        input_player1_a_mbtn: '"4"',      // Botón lateral -> Círculo
+        // Menú y salir
         input_player1_start: '"enter"',
         input_player1_select: '"rshift"',
-        // Atajo universal para salir y volver a MegaRetro Hub
         input_exit_emulator: '"escape"',
         input_enable_hotkey_btn: '"6"',
         input_exit_emulator_btn: '"7"'
@@ -304,7 +513,7 @@ async function ensureRetroArchAutoControls(retroarchDir) {
 
     await fsp.writeFile(cfgPath, content.trim() + '\n', 'utf-8');
 
-    // SwanStation (PS1): Mando DualShock automático
+    // SwanStation (PS1): Activar mando DualShock con ambos sticks activos
     await fsp.mkdir(coreOptDir, { recursive: true });
     let optContent = fs.existsSync(coreOptPath) ? await fsp.readFile(coreOptPath, 'utf-8') : '';
     const ps1Opts = {
@@ -354,6 +563,9 @@ async function launchGameById(gameId) {
         }
 
         await ensureRetroArchAutoControls(cwd);
+        if (game.system.toUpperCase() === 'PS1') {
+            startMouseToRightStickBridge();
+        }
         args = ['-L', corePath, romPath];
     } else if (game.emulator === 'pcsx2') {
         cwd = resolveInside(EMULATORS_DIR, 'pcsx2');
@@ -373,6 +585,7 @@ async function launchGameById(gameId) {
 
     activeEmulatorProcess.on('close', () => {
         activeEmulatorProcess = null;
+        stopMouseToRightStickBridge();
         setTimeout(() => {
             publishEvent({ type: 'GAME_CLOSED', gameId: game.id });
         }, 300);
@@ -380,6 +593,7 @@ async function launchGameById(gameId) {
 
     activeEmulatorProcess.on('error', (err) => {
         activeEmulatorProcess = null;
+        stopMouseToRightStickBridge();
         publishEvent({ type: 'GAME_ERROR', message: `Error al abrir emulador: ${err.message}` });
     });
 
@@ -787,6 +1001,8 @@ const server = http.createServer(async (req, res) => {
         sendJson(req, res, 400, { error: err.message });
     }
 });
+
+process.on('exit', stopMouseToRightStickBridge);
 
 await fsp.mkdir(GAMES_DIR, { recursive: true });
 const initialGames = await syncGamesFromDisk();
