@@ -2,13 +2,16 @@
   <!-- Barra superior -->
   <header class="topbar">
     <div class="brand">
-      <span class="logo-dot"></span>
+      <span class="brand-dot"></span>
       <h1>MEGARETRO <span>HUB</span></h1>
     </div>
 
-    <nav class="console-tabs">
+    <!-- Pestañas de consolas -->
+    <nav class="system-tabs" aria-label="Consolas">
       @for (sys of launcher.systems(); track sys) {
         <button
+          type="button"
+          class="tab-btn"
           [class.active]="launcher.selectedSystem() === sys"
           (click)="selectSystem(sys)">
           {{ sys === 'ALL' ? 'TODOS' : sys }}
@@ -16,120 +19,139 @@
       }
     </nav>
 
-    <div class="controls-bar">
-      <button class="btn-get-roms" (click)="launcher.scanDownloadsFolder()">
-  🔍 Escanear Descargas
-</button>
-      <button class="btn-get-roms" (click)="launcher.showGetGamesModal.set(true)">
-        🌐 Obtener Juegos
+    <!-- Acciones rápidas y búsqueda -->
+    <div class="topbar-actions">
+      <button
+        type="button"
+        class="action-btn secondary"
+        (click)="launcher.scanDownloadsFolder()"
+        title="Buscar ROMs comprimidas en la carpeta Descargas">
+        🔍 Escanear Descargas
       </button>
 
-      <input
-        type="search"
-        placeholder="Buscar juego..."
-        (input)="onSearch($event)" />
+      <button
+        type="button"
+        class="action-btn primary"
+        (click)="launcher.showGetGamesModal.set(true)">
+        ☁️ Obtener Juegos
+      </button>
 
-    <span class="input-badge" [class.gamepad-active]="gamepad.connected()">
-  {{ gamepad.connected() ? '🎮 ' + gamepad.controllerName() : '⌨️ Teclado / Ratón' }}
-</span>
+      <div class="search-box">
+        <input
+          type="search"
+          placeholder="Buscar juego..."
+          [value]="launcher.searchQuery()"
+          (input)="onSearch($any($event.target).value)" />
+      </div>
+
+      <span class="input-badge" [class.gamepad-active]="gamepad.connected()">
+        {{ gamepad.connected() ? '🎮 ' + gamepad.controllerName() : '⌨️ Teclado / Ratón' }}
+      </span>
     </div>
   </header>
 
-  <!-- Banner de radar activo esperando descarga -->
-  @if (launcher.radarActive()) {
-    <div class="radar-banner">
-      <span class="pulse-ring"></span>
-      <div>
-        <strong>Radar de Descargas Activo ({{ launcher.radarSystem() || 'Todas las consolas' }})</strong>
-        <small>Descarga cualquier .zip o ROM en tu navegador; se instalará aquí automáticamente.</small>
+  <!-- Banner de radar activo o importación en curso -->
+  @if (launcher.radarActive() || launcher.importingStatus()) {
+    <div class="status-banner">
+      @if (launcher.importingStatus()) {
+        <span class="spinner"></span>
+        <span>{{ launcher.importingStatus() }}</span>
+      } @else {
+        <span>📡 Radar de descargas activo{{ launcher.radarSystem() ? ' (' + launcher.radarSystem() + ')' : '' }}: descarga una ROM en tu navegador y se instalará sola.</span>
+        <button type="button" class="btn-stop-radar" (click)="launcher.stopRadar()">Detener</button>
+      }
+    </div>
+  }
+
+  <!-- Cuadrícula de juegos con cajas 3D -->
+  <main class="library-content">
+    @if (launcher.filteredGames().length === 0) {
+      <div class="empty-state">
+        <div class="empty-icon">🕹️</div>
+        <h2>Tu biblioteca está vacía</h2>
+        <p>Descarga un juego desde <strong>Obtener Juegos</strong> o pulsa <strong>Escanear Descargas</strong> si ya tienes archivos .zip o .7z en tu PC.</p>
       </div>
-      <button (click)="launcher.stopRadar()">Detener</button>
-    </div>
-  }
+    } @else {
+      <section class="games-grid">
+        @for (game of launcher.filteredGames(); track game.id; let idx = $index) {
+          <article
+            class="game-card"
+            [class.focused]="focusedIndex() === idx"
+            (mousemove)="onCardMouseMove($event)"
+            (mouseleave)="onCardMouseLeave($event)"
+            (click)="launcher.playOrDownload(game)">
 
-  <!-- Banner de importación en curso -->
-  @if (launcher.importingStatus()) {
-    <div class="radar-banner importing">
-      <div class="mini-spinner"></div>
-      <strong>{{ launcher.importingStatus() }}</strong>
-    </div>
-  }
+            <div class="cover-wrapper">
+              <img
+                [src]="game.coverUrl"
+                [alt]="game.title"
+                loading="lazy"
+                (error)="$any($event.target).src = 'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22400%22 height=%22400%22><rect width=%22100%25%22 height=%22100%25%22 fill=%22%23111827%22/><text x=%2250%25%22 y=%2250%25%22 fill=%22%2364748b%22 font-family=%22sans-serif%22 font-size=%2222%22 text-anchor=%22middle%22 dy=%22.3em%22>SIN CARÁTULA</text></svg>'" />
 
-  <!-- Estado vacío inicial -->
-  @if (launcher.filteredGames().length === 0) {
-    <section class="empty-state">
-      <h2>Tu biblioteca está lista para estrenarse</h2>
-      <p>Haz clic en <strong>"Obtener Juegos"</strong>, elige una consola y descarga tu primera ROM.</p>
-      <button class="btn-get-roms" (click)="launcher.showGetGamesModal.set(true)">
-        ➕ Descargar mi primer juego
-      </button>
-    </section>
-  }
+              <!-- Reflejo 3D dinámico -->
+              <div class="card-glare"></div>
+              <div class="cover-gradient"></div>
 
-  <!-- Cuadrícula de carátulas -->
-  <main class="games-grid">
-    @for (game of launcher.filteredGames(); track game.id; let i = $index) {
-      <article
-        class="game-card"
-        [class.focused]="focusedIndex() === i"
-        (mouseenter)="focusedIndex.set(i)"
-        (click)="launcher.playOrDownload(game)">
+              <!-- Etiqueta de sistema -->
+              <span class="system-pill">{{ game.system }}</span>
 
-        <div class="cover-wrapper">
-          <img [src]="game.coverUrl" [alt]="game.title" loading="lazy" />
-          <span class="system-tag">{{ game.system }}</span>
-
-          @if (game.installed) {
-            <span class="status-badge installed">▶ JUGAR</span>
-          } @else {
-            <span class="status-badge cloud">NUBE • {{ game.sizeMB }} MB</span>
-          }
-
-          @if (game.downloading || game.extracting) {
-            <div class="progress-overlay">
-              <p>{{ game.extracting ? 'Extrayendo ROM...' : 'Descargando ' + game.progress + '%' }}</p>
-              <div class="bar-track">
-                <div class="bar-fill" [style.width.%]="game.progress || 0"></div>
+              <!-- Botón flotante Jugar / Estado -->
+              <div class="cover-cta">
+                @if (game.downloading) {
+                  <span class="status-pill downloading">Descargando {{ game.progress ?? 0 }}%</span>
+                } @else if (game.extracting) {
+                  <span class="status-pill extracting">Extrayendo...</span>
+                } @else {
+                  <button
+                    type="button"
+                    class="play-pill"
+                    (click)="$event.stopPropagation(); launcher.playOrDownload(game)">
+                    ▶ JUGAR
+                  </button>
+                }
               </div>
             </div>
-          }
-        </div>
 
-        <div class="card-footer">
-          <div class="meta">
-            <h3>{{ game.title }}</h3>
-            <small>{{ game.year }} • {{ game.sizeMB }} MB</small>
-          </div>
+            <div class="card-footer">
+              <div class="game-meta">
+                <h3 [title]="game.title">{{ game.title }}</h3>
+                <p>{{ game.year }} • {{ game.sizeMB }} MB</p>
+              </div>
 
-          @if (game.installed) {
-            <button
-              class="btn-delete"
-              title="Eliminar ROM del disco (Tecla Supr / Botón X)"
-              (click)="$event.stopPropagation(); launcher.uninstallGame(game)">
-              ✕
-            </button>
-          }
-        </div>
-      </article>
+              @if (game.installed) {
+                <button
+                  type="button"
+                  class="delete-btn"
+                  title="Desinstalar ROM"
+                  (click)="$event.stopPropagation(); launcher.uninstallGame(game)">
+                  ✕
+                </button>
+              }
+            </div>
+          </article>
+        }
+      </section>
     }
   </main>
 
-  <!-- Asistente modal para elegir consola -->
-  <app-download-wizard />
-
-  <!-- Pantalla de bloqueo mientras el emulador está abierto -->
+  <!-- Overlay cuando hay un juego abierto -->
   @if (launcher.activeGameTitle()) {
-    <div class="playing-modal">
-      <div class="modal-box">
-        <div class="spinner"></div>
-        <h2>Ejecutando {{ launcher.activeGameTitle() }}</h2>
-        <p>Cierra el emulador para volver automáticamente al menú.</p>
+    <div class="playing-overlay">
+      <div class="playing-box">
+        <span class="pulse-dot"></span>
+        <h2>Ejecutando: {{ launcher.activeGameTitle() }}</h2>
+        <p>Pulsa <strong>Esc</strong> en el teclado o <strong>Start + Select</strong> en tu mando para volver al Hub.</p>
       </div>
     </div>
   }
 
-  <!-- Notificaciones -->
+  <!-- Notificación Toast -->
   @if (launcher.toastMessage()) {
-    <div class="toast">{{ launcher.toastMessage() }}</div>
+    <div class="toast-banner" role="status">
+      {{ launcher.toastMessage() }}
+    </div>
   }
+
+  <!-- Modal Asistente de Descargas -->
+  <app-download-wizard />
 </div>

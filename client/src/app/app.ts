@@ -16,14 +16,12 @@ export class App {
   readonly focusedIndex = signal<number>(0);
 
   constructor() {
-    // Reacciona automáticamente a cualquier botón/dirección del mando USB o Bluetooth
     effect(() => {
       const ev = this.gamepad.lastAction();
       if (!ev) return;
       this.handleNavigationAction(ev.action);
     });
 
-    // Reinicia el cursor a 0 si cambia el filtro de consola o búsqueda y queda fuera de rango
     effect(() => {
       const total = this.launcher.filteredGames().length;
       if (this.focusedIndex() >= total) {
@@ -40,6 +38,29 @@ export class App {
   onSearch(val: string): void {
     this.launcher.searchQuery.set(val);
     this.focusedIndex.set(0);
+  }
+
+  onCardMouseMove(event: MouseEvent): void {
+    const card = event.currentTarget as HTMLElement;
+    const rect = card.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+
+    const rotateY = (x - 0.5) * 20;
+    const rotateX = (0.5 - y) * 20;
+
+    card.style.setProperty('--rx', `${rotateX.toFixed(2)}deg`);
+    card.style.setProperty('--ry', `${rotateY.toFixed(2)}deg`);
+    card.style.setProperty('--mx', `${(x * 100).toFixed(1)}%`);
+    card.style.setProperty('--my', `${(y * 100).toFixed(1)}%`);
+  }
+
+  onCardMouseLeave(event: MouseEvent): void {
+    const card = event.currentTarget as HTMLElement;
+    card.style.setProperty('--rx', '0deg');
+    card.style.setProperty('--ry', '0deg');
+    card.style.setProperty('--mx', '50%');
+    card.style.setProperty('--my', '0%');
   }
 
   @HostListener('window:keydown', ['$event'])
@@ -70,7 +91,6 @@ export class App {
   }
 
   private handleNavigationAction(action: GamepadAction): void {
-    // Si el modal de "Obtener Juegos" está abierto, el botón B / Atrás lo cierra
     if (this.launcher.showGetGamesModal()) {
       if (action === 'BACK') {
         this.launcher.showGetGamesModal.set(false);
@@ -78,13 +98,11 @@ export class App {
       return;
     }
 
-    // No navegar si ya hay un emulador ejecutándose en pantalla completa
     if (this.launcher.activeGameTitle()) return;
 
     const games = this.launcher.filteredGames();
     const systems = this.launcher.systems();
 
-    // Cambiar de pestaña de consola con Arriba / Abajo
     if ((action === 'UP' || action === 'DOWN') && systems.length > 1) {
       const idx = systems.indexOf(this.launcher.selectedSystem());
       const step = action === 'DOWN' ? 1 : -1;
