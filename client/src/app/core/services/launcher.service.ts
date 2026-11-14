@@ -1,11 +1,13 @@
 import { Injectable, signal, computed, OnDestroy, inject, PLATFORM_ID } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
-import { RetroGame, LauncherEvent } from '../models/game.model';
+import { RetroGame, LauncherEvent, SystemStatus } from '../models/game.model';
 
 @Injectable({ providedIn: 'root' })
 export class LauncherService implements OnDestroy {
   private readonly platformId = inject(PLATFORM_ID);
-  private readonly apiUrl = 'http://localhost:3333/api';
+  // El frontend siempre lo sirve el mismo servidor Node, así que las rutas
+  // relativas funcionan igual en localhost:3333 y en el puerto que elija Electron.
+  private readonly apiUrl = '/api';
   private eventSource: EventSource | null = null;
 
   // Estado reactivo con Angular Signals
@@ -14,12 +16,17 @@ export class LauncherService implements OnDestroy {
   readonly searchQuery = signal<string>('');
   readonly activeGameTitle = signal<string | null>(null);
   readonly toastMessage = signal<string | null>(null);
+  readonly systemStatus = signal<SystemStatus | null>(null);
+  readonly showStatusModal = signal<boolean>(false);
 
   // Estado del asistente de descargas y radar
   readonly showGetGamesModal = signal<boolean>(false);
   readonly radarActive = signal<boolean>(false);
   readonly radarSystem = signal<string | null>(null);
   readonly importingStatus = signal<string | null>(null);
+  readonly refreshing = signal<boolean>(false);
+  readonly scanning = signal<boolean>(false);
+  readonly pendingDelete = signal<RetroGame | null>(null);
   readonly webSources = signal<Record<string, string>>({
     PS1: 'https://archive.org/details/psx-redump',
     SNES: 'https://archive.org/details/no-intro-nintendo-super-nintendo-entertainment-system',
@@ -53,15 +60,26 @@ export class LauncherService implements OnDestroy {
     }
   }
 
-  async loadCatalog(): Promise<void> {
+  async loadCatalog(showFeedback = false): Promise<void> {
+    this.refreshing.set(true);
     try {
       const res = await fetch(`${this.apiUrl}/catalog`);
       if (!res.ok) throw new Error();
       const data: RetroGame[] = await res.json();
-      this.games.set(data);
+      this.games.set(data.filter((game) => game.installed !== false));
+      if (showFeedback) {
+        this.showToast(`🔄 Biblioteca actualizada: ${data.length} juego(s)`);
+      }
     } catch {
       this.showToast('⚠️ No se pudo conectar con el servidor Node.js (puerto 3333)');
+    } finally {
+      this.refreshing.set(false);
     }
+  }
+
+  async refreshLibrary(): Promise<void> {
+    if (this.refreshing()) return;
+    await this.loadCatalog(true);
   }
 
   async loadSources(): Promise<void> {
@@ -91,12 +109,36 @@ export class LauncherService implements OnDestroy {
     }
   }
 
-  async uninstallGame(game: RetroGame): Promise<void> {
+  async closeActiveGame(): Promise<void> {
+    // Quita el overlay de inmediato para que la interfaz nunca quede atrapada.
+    this.activeGameTitle.set(null);
+    try {
+      await fetch(`${this.apiUrl}/game/stop`, { method: 'POST' });
+    } catch {
+      // Si el servidor no responde, la interfaz ya quedó liberada.
+    }
+  }
+
+  requestUninstall(game: RetroGame): void {
     if (!game.installed || game.downloading) return;
+    this.pendingDelete.set(game);
+  }
+
+  cancelUninstall(): void {
+    this.pendingDelete.set(null);
+  }
+
+  async confirmUninstall(): Promise<void> {
+    const game = this.pendingDelete();
+    if (!game) return;
+    this.pendingDelete.set(null);
+
     try {
       await fetch(`${this.apiUrl}/game/${encodeURIComponent(game.id)}`, {
         method: 'DELETE'
       });
+      this.games.update((list) => list.filter((item) => item.id !== game.id));
+      this.showToast(`🗑️ "${game.title}" eliminado de la biblioteca`);
     } catch {
       this.showToast('No se pudo eliminar la ROM');
     }
@@ -141,13 +183,26 @@ export class LauncherService implements OnDestroy {
   }
 
   async scanDownloadsFolder(): Promise<void> {
-    const res = await fetch(`${this.apiUrl}/radar/scan`, { method: 'POST' });
-    const data = await res.json();
-    this.showToast(
-      data.found > 0
-        ? `🔍 Importando ${data.found} archivo(s) encontrado(s) en Descargas...`
-        : 'No se encontraron ROMs nuevas en Descargas (últimas 24h)'
-    );
+    if (this.scanning()) return;
+    this.scanning.set(true);
+
+    try {
+      const res = await fetch(`${this.apiUrl}/radar/scan`, { method: 'POST' });
+      const data = await res.json();
+      const found = Number(data.found) || 0;
+
+      if (found > 0) {
+        this.showToast(`🔍 Importando ${found} archivo(s) de Descargas...`);
+      } else if (Array.isArray(data.ignored) && data.ignored.length > 0) {
+        this.showToast('No se encontraron ROMs nuevas. Se ignoraron BIOS, manuales y archivos antiguos.');
+      } else {
+        this.showToast('No se encontraron ROMs nuevas en Descargas (últimos 7 días)');
+      }
+    } catch {
+      this.showToast('No se pudo escanear la carpeta Descargas');
+    } finally {
+      this.scanning.set(false);
+    }
   }
 
   private handleBackendEvent(ev: LauncherEvent): void {
@@ -164,9 +219,17 @@ export class LauncherService implements OnDestroy {
       case 'GAME_IMPORTED':
         this.importingStatus.set(null);
         if (ev.game) {
-          this.games.update((list) => [ev.game!, ...list]);
-          this.selectedSystem.set(ev.game.system);
-          this.showToast(`✅ "${ev.game.title}" importado y listo para jugar`);
+          const imported = ev.game;
+          const normalize = (game: RetroGame) =>
+            `${game.system}|${game.executableFile}`.toLowerCase();
+          this.games.update((list) => [
+            imported,
+            ...list.filter(
+              (item) => item.id !== imported.id && normalize(item) !== normalize(imported)
+            )
+          ]);
+          this.selectedSystem.set(imported.system);
+          this.showToast(`✅ "${imported.title}" importado y listo para jugar`);
         }
         break;
 
@@ -197,7 +260,7 @@ export class LauncherService implements OnDestroy {
         break;
 
       case 'GAME_DELETED':
-        this.patchGame(ev.gameId!, { installed: false, progress: 0 });
+        this.games.update((list) => list.filter((item) => item.id !== ev.gameId));
         this.showToast('ROM eliminada del disco local');
         break;
 

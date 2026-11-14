@@ -24,9 +24,21 @@
       <button
         type="button"
         class="action-btn secondary"
+        [class.spinning]="launcher.refreshing()"
+        [disabled]="launcher.refreshing()"
+        (click)="launcher.refreshLibrary()"
+        title="Recargar la biblioteca desde el disco (R)">
+        <span class="refresh-icon">🔄</span>
+        {{ launcher.refreshing() ? 'Actualizando...' : 'Refrescar' }}
+      </button>
+
+      <button
+        type="button"
+        class="action-btn secondary"
+        [disabled]="launcher.scanning()"
         (click)="launcher.scanDownloadsFolder()"
         title="Buscar ROMs comprimidas en la carpeta Descargas">
-        🔍 Escanear Descargas
+        {{ launcher.scanning() ? '🔍 Escaneando...' : '🔍 Escanear Descargas' }}
       </button>
 
       <button
@@ -123,7 +135,7 @@
                   type="button"
                   class="delete-btn"
                   title="Desinstalar ROM"
-                  (click)="$event.stopPropagation(); launcher.uninstallGame(game)">
+                  (click)="$event.stopPropagation(); requestDelete(game)">
                   ✕
                 </button>
               }
@@ -141,6 +153,9 @@
         <span class="pulse-dot"></span>
         <h2>Ejecutando: {{ launcher.activeGameTitle() }}</h2>
         <p>Pulsa <strong>Esc</strong> en el teclado o <strong>Start + Select</strong> en tu mando para volver al Hub.</p>
+        <button type="button" class="btn-back-hub" (click)="launcher.closeActiveGame()">
+          Volver al Hub
+        </button>
       </div>
     </div>
   }
@@ -149,6 +164,31 @@
   @if (launcher.toastMessage()) {
     <div class="toast-banner" role="status">
       {{ launcher.toastMessage() }}
+    </div>
+  }
+
+  <!-- Confirmación antes de eliminar un juego -->
+  @if (launcher.pendingDelete(); as game) {
+    <div class="modal-backdrop confirm-backdrop" (click)="cancelDelete()">
+      <div
+        class="confirm-modal"
+        role="alertdialog"
+        aria-modal="true"
+        (click)="$event.stopPropagation()">
+        <div class="confirm-icon">⚠️</div>
+        <h2>¿Eliminar "{{ game.title }}"?</h2>
+        <p>
+          Se borrarán la ROM y todos sus archivos del disco. Esta acción no se puede deshacer.
+        </p>
+        <div class="confirm-actions">
+          <button type="button" class="btn-cancel" (click)="cancelDelete()">
+            Cancelar <span class="key-hint">Esc</span>
+          </button>
+          <button type="button" class="btn-danger" (click)="confirmDelete()">
+            Sí, eliminar <span class="key-hint">Enter</span>
+          </button>
+        </div>
+      </div>
     </div>
   }
 

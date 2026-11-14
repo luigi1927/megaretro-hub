@@ -7,10 +7,10 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "node --test server/tests",
+    "test": "node --test server/tests/*.test.js",
     "start": "node server/src/main.js",
     "desktop": "node server/src/main.js --app",
-    "test:coverage": "node --test --experimental-test-coverage server/tests"
+    "test:coverage": "node --test --experimental-test-coverage server/tests/*.test.js"
   },
   "keywords": [],
   "author": "",

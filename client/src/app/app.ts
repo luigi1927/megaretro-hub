@@ -1,6 +1,7 @@
-import { Component, inject, signal, effect, HostListener } from '@angular/core';
+import { Component, inject, signal, effect, HostListener, untracked } from '@angular/core';
 import { LauncherService } from './core/services/launcher.service';
 import { GamepadService, GamepadAction } from './core/services/gamepad.service';
+import { RetroGame } from './core/models/game.model';
 import { DownloadWizardComponent } from './features/launcher/components/download-wizard.component';
 
 @Component({
@@ -19,7 +20,9 @@ export class App {
     effect(() => {
       const ev = this.gamepad.lastAction();
       if (!ev) return;
-      this.handleNavigationAction(ev.action);
+      // untracked evita que las señales modificadas dentro del manejador
+      // vuelvan a disparar este effect (bucle infinito con el mando).
+      untracked(() => this.handleNavigationAction(ev.action));
     });
 
     effect(() => {
@@ -38,6 +41,18 @@ export class App {
   onSearch(val: string): void {
     this.launcher.searchQuery.set(val);
     this.focusedIndex.set(0);
+  }
+
+  requestDelete(game: RetroGame): void {
+    this.launcher.requestUninstall(game);
+  }
+
+  confirmDelete(): void {
+    this.launcher.confirmUninstall();
+  }
+
+  cancelDelete(): void {
+    this.launcher.cancelUninstall();
   }
 
   onCardMouseMove(event: MouseEvent): void {
@@ -68,8 +83,32 @@ export class App {
     const tag = (event.target as HTMLElement)?.tagName;
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
 
+    if (this.launcher.activeGameTitle()) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        void this.launcher.closeActiveGame();
+      }
+      return;
+    }
+
+    if (this.launcher.pendingDelete()) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.cancelDelete();
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        this.confirmDelete();
+      }
+      return;
+    }
+
     if (event.key === 'Escape' && this.launcher.showGetGamesModal()) {
       this.launcher.showGetGamesModal.set(false);
+      return;
+    }
+
+    if ((event.key === 'r' || event.key === 'R') && !event.ctrlKey && !event.metaKey) {
+      this.launcher.refreshLibrary();
       return;
     }
 
@@ -91,6 +130,12 @@ export class App {
   }
 
   private handleNavigationAction(action: GamepadAction): void {
+    if (this.launcher.pendingDelete()) {
+      if (action === 'CONFIRM') this.confirmDelete();
+      else if (action === 'BACK') this.cancelDelete();
+      return;
+    }
+
     if (this.launcher.showGetGamesModal()) {
       if (action === 'BACK') {
         this.launcher.showGetGamesModal.set(false);
@@ -98,7 +143,10 @@ export class App {
       return;
     }
 
-    if (this.launcher.activeGameTitle()) return;
+    if (this.launcher.activeGameTitle()) {
+      if (action === 'EXIT') void this.launcher.closeActiveGame();
+      return;
+    }
 
     const games = this.launcher.filteredGames();
     const systems = this.launcher.systems();
@@ -126,7 +174,7 @@ export class App {
         this.launcher.playOrDownload(games[current]);
         break;
       case 'DELETE':
-        this.launcher.uninstallGame(games[current]);
+        this.launcher.requestUninstall(games[current]);
         break;
     }
   }

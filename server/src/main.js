@@ -10,21 +10,51 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..', '..');
 
-const PORT = 3333;
+// En modo escritorio (Electron) estas rutas llegan por variables de entorno:
+// los emuladores y el frontend viven junto a la instalación, mientras que los
+// juegos, el catálogo y las partidas se guardan en la carpeta de datos del
+// usuario (LocalAppData) para sobrevivir a actualizaciones.
+const PORT = Number(process.env.MEGARETRO_PORT) || 3333;
+const PACKAGED = Boolean(process.env.MEGARETRO_PACKAGED);
+const DATA_DIR = process.env.MEGARETRO_DATA_DIR
+    ? path.resolve(process.env.MEGARETRO_DATA_DIR)
+    : ROOT_DIR;
 
-const CLIENT_DIST_DIR = path.join(ROOT_DIR, 'client', 'dist', 'client', 'browser');
-const CLIENT_DIST_FALLBACK = path.join(ROOT_DIR, 'client', 'dist', 'client');
-const GAMES_DIR = path.join(ROOT_DIR, 'games');
-const EMULATORS_DIR = path.join(ROOT_DIR, 'emulators');
-const CATALOG_PATH = path.join(ROOT_DIR, 'server', 'catalog.json');
-const SOURCES_PATH = path.join(ROOT_DIR, 'server', 'sources.json');
-const DOWNLOADS_DIR = path.join(os.homedir(), 'Downloads');
+const CLIENT_DIST_DIR = process.env.MEGARETRO_CLIENT_DIR
+    ? path.resolve(process.env.MEGARETRO_CLIENT_DIR)
+    : path.join(ROOT_DIR, 'client', 'dist', 'client', 'browser');
+const CLIENT_DIST_FALLBACK = path.resolve(CLIENT_DIST_DIR, '..');
+const GAMES_DIR = process.env.MEGARETRO_GAMES_DIR
+    ? path.resolve(process.env.MEGARETRO_GAMES_DIR)
+    : path.join(DATA_DIR, 'games');
+const EMULATORS_DIR = process.env.MEGARETRO_EMULATORS_DIR
+    ? path.resolve(process.env.MEGARETRO_EMULATORS_DIR)
+    : path.join(ROOT_DIR, 'emulators');
+const CATALOG_PATH = process.env.MEGARETRO_CATALOG_PATH
+    ? path.resolve(process.env.MEGARETRO_CATALOG_PATH)
+    : path.join(ROOT_DIR, 'server', 'catalog.json');
+const SOURCES_PATH = process.env.MEGARETRO_SOURCES_PATH
+    ? path.resolve(process.env.MEGARETRO_SOURCES_PATH)
+    : path.join(ROOT_DIR, 'server', 'sources.json');
+const CONFIG_TEMPLATES_DIR = path.join(EMULATORS_DIR, '.config');
+const DOWNLOADS_DIR = process.env.MEGARETRO_DOWNLOADS_DIR
+    ? path.resolve(process.env.MEGARETRO_DOWNLOADS_DIR)
+    : path.join(os.homedir(), 'Downloads');
+
+// Configuración de PCSX2 en el perfil del usuario. PCSX2 no es portable por
+// defecto: guarda memcards, BIOS y ajustes en Documentos\PCSX2.
+const PCSX2_DATA_DIR = process.env.MEGARETRO_PCSX2_DIR
+    ? path.resolve(process.env.MEGARETRO_PCSX2_DIR)
+    : path.join(os.homedir(), 'Documents', 'PCSX2');
+const PCSX2_BIOS_DIR = path.join(PCSX2_DATA_DIR, 'bios');
+const PCSX2_INI_PATH = path.join(PCSX2_DATA_DIR, 'inis', 'PCSX2.ini');
 
 const ARCHIVE_EXTS = ['.zip', '.7z'];
 
 const EXT_PROFILES = {
     '.cue': { system: 'PS1', emulator: 'retroarch', core: 'swanstation_libretro.dll', dir: 'Sony - PlayStation' },
     '.chd': { system: 'PS1', emulator: 'retroarch', core: 'swanstation_libretro.dll', dir: 'Sony - PlayStation' },
+    '.bin': { system: 'PS1', emulator: 'retroarch', core: 'swanstation_libretro.dll', dir: 'Sony - PlayStation' },
     '.gba': { system: 'GBA', emulator: 'retroarch', core: 'mgba_libretro.dll', dir: 'Nintendo - Game Boy Advance' },
     '.gbc': { system: 'GBC', emulator: 'retroarch', core: 'gambatte_libretro.dll', dir: 'Nintendo - Game Boy Color' },
     '.gb': { system: 'GB', emulator: 'retroarch', core: 'gambatte_libretro.dll', dir: 'Nintendo - Game Boy' },
@@ -38,6 +68,179 @@ const EXT_PROFILES = {
     '.iso': { system: 'PS2', emulator: 'pcsx2', core: null, dir: 'Sony - PlayStation 2' },
     '.rvz': { system: 'GC', emulator: 'dolphin', core: null, dir: 'Nintendo - GameCube' }
 };
+
+const ROM_EXTS = new Set(Object.keys(EXT_PROFILES));
+
+// Extensiones que pueden pertenecer a más de un sistema: manda el sistema
+// elegido por el usuario (o el perfil por defecto si no hay ninguno).
+const AMBIGUOUS_EXTS = new Set(['.iso', '.bin', '.img']);
+
+// Extensiones cuyo sistema se puede corregir automáticamente sin ambigüedad.
+const STRONG_SYSTEM_EXTS = new Set([...ROM_EXTS].filter((ext) => !AMBIGUOUS_EXTS.has(ext)));
+
+// Archivos que NUNCA son un juego, aunque su extensión coincida (ej: README.md
+// de un ZIP de documentación se interpretaba como ROM de Mega Drive).
+const DOC_NAME_PATTERN = /(^|[\\/_.\-\s])(readme|licen[cs]e|copying|changelog|notice|manual|instructions?|credits|authors|contributors|docs?)([\\/_.\-\s]|$)/i;
+const ROM_EXTRA_EXTS = new Set(['.m3u', '.img', '.sub', '.ccd', '.mds', '.mdf', '.toc', '.gcm']);
+
+// Archivos que suelen estar en Descargas pero no son juegos.
+const JUNK_DOWNLOAD_PATTERN = /(^|[\\/_.\-\s])(bios|firmware|speech|soundtrack|artwork|manual(?:es)?|readme|licen[cs]e|screenshots?|packshots?|docs?)([\\/_.\-\s]|$)/i;
+
+// Tamaño mínimo razonable para considerar que un archivo es una ROM.
+function minRomBytes(ext) {
+    if (ext === '.md') return 131_072;
+    if (ext === '.bin' || ext === '.iso') return 1_048_576;
+    if (ext === '.cue') return 16;
+    return 8_192;
+}
+
+const SYSTEM_COVER_DIR = {
+    PS1: 'Sony - PlayStation',
+    PS2: 'Sony - PlayStation 2',
+    SNES: 'Nintendo - Super Nintendo Entertainment System',
+    NES: 'Nintendo - Nintendo Entertainment System',
+    N64: 'Nintendo - Nintendo 64',
+    GB: 'Nintendo - Game Boy',
+    GBC: 'Nintendo - Game Boy Color',
+    GBA: 'Nintendo - Game Boy Advance',
+    NDS: 'Nintendo - Nintendo DS',
+    GENESIS: 'Sega - Mega Drive - Genesis',
+    GC: 'Nintendo - GameCube'
+};
+
+// Un .md de documentación es texto plano; una ROM de Mega Drive es binaria.
+async function looksLikeBinary(filePath) {
+    try {
+        const handle = await fsp.open(filePath, 'r');
+        const buffer = Buffer.alloc(4096);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        await handle.close();
+        if (bytesRead === 0) return false;
+
+        let nonPrintable = 0;
+        for (let i = 0; i < bytesRead; i++) {
+            const byte = buffer[i];
+            if (byte < 9 || (byte > 13 && byte < 32) || byte === 127) nonPrintable++;
+        }
+        return nonPrintable / bytesRead > 0.08;
+    } catch {
+        return false;
+    }
+}
+
+async function isLikelyRomFile(filePath, ext) {
+    const base = path.basename(filePath);
+    if (DOC_NAME_PATTERN.test(base)) return false;
+
+    const stat = await fsp.stat(filePath).catch(() => null);
+    if (!stat || !stat.isFile()) return false;
+    if (stat.size < minRomBytes(ext)) return false;
+
+    if (ext === '.md' && !(await looksLikeBinary(filePath))) return false;
+    return true;
+}
+
+// Si la carpeta tiene un .cue, los .bin son pistas de ese disco y no juegos aparte.
+async function hasCueSibling(filePath) {
+    const dir = path.dirname(filePath);
+    const names = await fsp.readdir(dir).catch(() => []);
+    return names.some((name) => name.toLowerCase().endsWith('.cue'));
+}
+
+function isJunkDownloadName(name) {
+    return DOC_NAME_PATTERN.test(name) || JUNK_DOWNLOAD_PATTERN.test(name);
+}
+
+function resolveSystemForExtension(ext, preferredSystem) {
+    const profile = EXT_PROFILES[ext];
+    if (!profile) return preferredSystem ? String(preferredSystem).toUpperCase() : null;
+
+    const preferred = preferredSystem ? String(preferredSystem).toUpperCase() : null;
+    if (preferred && (AMBIGUOUS_EXTS.has(ext) || profile.system === preferred)) {
+        return preferred;
+    }
+    return profile.system;
+}
+
+function buildCoverUrl(system, title) {
+    const dir = SYSTEM_COVER_DIR[system] || EXT_PROFILES[Object.keys(EXT_PROFILES).find((ext) => EXT_PROFILES[ext].system === system)]?.dir;
+    if (!dir) return '';
+    return `https://thumbnails.libretro.com/${encodeURIComponent(dir)}/Named_Boxarts/${encodeURIComponent(title + ' (USA)')}.png`;
+}
+
+function buildCueContent(entries) {
+    const lines = [];
+    entries.forEach((entry, index) => {
+        lines.push(`FILE "${entry.name}" BINARY`);
+        lines.push(`  TRACK ${String(index + 1).padStart(2, '0')} ${entry.mode}`);
+        if (index > 0) lines.push('    INDEX 00 00:00:00');
+        lines.push('    INDEX 01 00:00:00');
+    });
+    return lines.join('\n') + '\n';
+}
+
+// Crea un .cue cuando el usuario descarga una ISO de PS1 como .bin suelto.
+async function ensureCueForBin(binPath) {
+    const cuePath = path.join(path.dirname(binPath), path.parse(binPath).name + '.cue');
+    if (fs.existsSync(cuePath)) return cuePath;
+
+    const dir = path.dirname(binPath);
+    const base = path.parse(binPath).name.toLowerCase();
+    const siblings = await fsp.readdir(dir);
+    const bins = siblings
+        .filter((name) => name.toLowerCase().endsWith('.bin'))
+        .filter((name) => {
+            const siblingBase = path.parse(name).name.toLowerCase();
+            return siblingBase === base || siblingBase.startsWith(`${base} (`) || siblingBase.startsWith(`${base}-`);
+        })
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
+    const names = bins.length > 0 ? bins : [path.basename(binPath)];
+    const entries = [];
+    for (const name of names) {
+        const stat = await fsp.stat(path.join(dir, name)).catch(() => null);
+        const mode = stat && stat.size % 2352 === 0 ? 'MODE2/2352' : 'MODE1/2048';
+        entries.push({ name, mode });
+    }
+
+    await fsp.writeFile(cuePath, buildCueContent(entries), 'utf-8');
+    return cuePath;
+}
+
+// Devuelve los archivos que forman parte del juego (no todo el contenido del ZIP).
+async function collectGameFiles(allFiles, romFile) {
+    const romDir = path.dirname(romFile);
+    const romExt = path.extname(romFile).toLowerCase();
+    const selected = new Set([romFile]);
+
+    if (romExt === '.cue') {
+        try {
+            const cue = await fsp.readFile(romFile, 'utf-8');
+            for (const match of cue.matchAll(/FILE\s+"([^"]+)"/gi)) {
+                const candidate = path.join(romDir, match[1]);
+                if (fs.existsSync(candidate)) selected.add(candidate);
+            }
+        } catch {
+            // Si el .cue está dañado, al menos se copia el propio .cue.
+        }
+    } else if (romExt === '.bin') {
+        const cuePath = path.join(romDir, path.parse(romFile).name + '.cue');
+        if (fs.existsSync(cuePath)) selected.add(cuePath);
+    } else {
+        const base = path.parse(romFile).name.toLowerCase();
+        for (const file of allFiles) {
+            if (path.dirname(file) !== romDir) continue;
+            const ext = path.extname(file).toLowerCase();
+            if (!ROM_EXTS.has(ext) && !ROM_EXTRA_EXTS.has(ext)) continue;
+            const fileBase = path.parse(file).name.toLowerCase();
+            if (fileBase === base || fileBase.startsWith(`${base} (`) || fileBase.startsWith(`${base}-`)) {
+                selected.add(file);
+            }
+        }
+    }
+
+    return [...selected];
+}
 
 const MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
@@ -126,26 +329,37 @@ async function writeCatalog(games) {
 async function syncGamesFromDisk() {
     const catalog = await readCatalog();
     let modified = false;
+    const validRelPaths = new Map();
 
     if (fs.existsSync(GAMES_DIR)) {
         const allGameFiles = await walkFiles(GAMES_DIR);
-        const romFiles = allGameFiles.filter((f) => Boolean(EXT_PROFILES[path.extname(f).toLowerCase()]));
+        const romFiles = [];
 
-        for (const romFile of romFiles) {
-            const romExt = path.extname(romFile).toLowerCase();
+        for (const file of allGameFiles) {
+            const ext = path.extname(file).toLowerCase();
+            if (!ROM_EXTS.has(ext)) continue;
+            if (ext === '.bin' && (await hasCueSibling(file))) continue;
+            if (!(await isLikelyRomFile(file, ext))) continue;
+
+            const rel = path.relative(GAMES_DIR, file).split(path.sep).join('/');
+            validRelPaths.set(rel.toLowerCase(), rel);
+            romFiles.push({ file, ext, rel });
+        }
+
+        const knownSystems = new Set(Object.values(EXT_PROFILES).map((profile) => profile.system));
+
+        for (const { file: romFile, ext: romExt, rel } of romFiles) {
             const profile = EXT_PROFILES[romExt];
-            const relFromGames = path.relative(GAMES_DIR, romFile);
-            const parts = relFromGames.split(path.sep);
+            const parts = rel.split('/');
+            if (parts.length < 2) continue; // archivo suelto en la raíz de games/
 
-            const firstFolder = parts.length > 1 ? parts[0].toUpperCase() : profile.system;
-            const system = Object.values(EXT_PROFILES).some((p) => p.system === firstFolder)
-                ? firstFolder
-                : profile.system;
-
-            const sysDirPath = path.join(GAMES_DIR, system.toLowerCase());
-            const relExec = parts.length > 1 ? parts.slice(1).join('/') : path.basename(romFile);
+            const firstFolder = parts[0].toUpperCase();
+            const folderSystem = knownSystems.has(firstFolder) ? firstFolder : profile.system;
+            const system = resolveSystemForExtension(romExt, folderSystem);
+            const relExec = parts.slice(1).join('/');
 
             const parentFolder = path.dirname(romFile);
+            const sysDirPath = path.join(GAMES_DIR, system.toLowerCase());
             let totalBytes = 0;
             if (parentFolder !== sysDirPath && parentFolder !== GAMES_DIR) {
                 const siblingFiles = await walkFiles(parentFolder);
@@ -160,7 +374,7 @@ async function syncGamesFromDisk() {
 
             const sizeMB = +(totalBytes / 1048576).toFixed(1);
             const existing = catalog.find(
-                (g) => g.system.toUpperCase() === system && g.executableFile === relExec
+                (g) => g.system.toUpperCase() === system && g.executableFile.toLowerCase() === relExec.toLowerCase()
             );
 
             if (existing) {
@@ -171,7 +385,9 @@ async function syncGamesFromDisk() {
             } else {
                 const cleanTitle = path.parse(romFile).name.replace(/\s*[\(\[].*?[\)\]]/g, '').trim();
                 const slug = sanitizeSlug(cleanTitle);
-                const coverUrl = `https://thumbnails.libretro.com/${encodeURIComponent(profile.dir)}/Named_Boxarts/${encodeURIComponent(cleanTitle + ' (USA)')}.png`;
+                const launch = system === 'PS1'
+                    ? { emulator: 'retroarch', core: 'swanstation_libretro.dll' }
+                    : { emulator: profile.emulator, core: profile.core };
 
                 catalog.push({
                     id: `${system.toLowerCase()}-${slug}-${Date.now().toString(36)}`,
@@ -179,9 +395,9 @@ async function syncGamesFromDisk() {
                     system,
                     year: new Date().getFullYear(),
                     sizeMB,
-                    emulator: system === 'PS1' ? 'retroarch' : profile.emulator,
-                    core: system === 'PS1' ? 'swanstation_libretro.dll' : profile.core,
-                    coverUrl,
+                    emulator: launch.emulator,
+                    core: launch.core,
+                    coverUrl: buildCoverUrl(system, cleanTitle),
                     executableFile: relExec
                 });
                 modified = true;
@@ -189,11 +405,93 @@ async function syncGamesFromDisk() {
         }
     }
 
-    if (modified) {
-        await writeCatalog(catalog);
+    // Limpia entradas obsoletas (ROM borrada, README.md importado por error, etc.)
+    // y corrige juegos guardados en la carpeta del sistema equivocado.
+    const nextCatalog = [];
+    const seenEntries = new Set();
+
+    for (const game of catalog) {
+        const ext = path.extname(game.executableFile || '').toLowerCase();
+        if (!ROM_EXTS.has(ext)) {
+            modified = true;
+            continue;
+        }
+
+        const currentRel = `${game.system.toLowerCase()}/${game.executableFile}`.replace(/\\/g, '/');
+        let actualRel = validRelPaths.get(currentRel.toLowerCase());
+
+        if (!actualRel) {
+            const suffix = `/${game.executableFile.toLowerCase()}`;
+            for (const [key, value] of validRelPaths) {
+                if (key.endsWith(suffix)) {
+                    actualRel = value;
+                    break;
+                }
+            }
+        }
+
+        if (!actualRel) {
+            modified = true;
+            continue;
+        }
+
+        let system = actualRel.split('/')[0].toUpperCase();
+        const actualFolderSystem = system;
+        const profile = EXT_PROFILES[ext];
+
+        if (STRONG_SYSTEM_EXTS.has(ext)) {
+            const expectedSystem = profile.system;
+            if (actualFolderSystem !== expectedSystem) {
+                const relDir = path.dirname(game.executableFile);
+                try {
+                    const src = resolveInside(GAMES_DIR, actualFolderSystem.toLowerCase(), relDir);
+                    const dst = resolveInside(GAMES_DIR, expectedSystem.toLowerCase(), relDir);
+                    if (relDir !== '.' && fs.existsSync(src) && !fs.existsSync(dst)) {
+                        await fsp.mkdir(path.dirname(dst), { recursive: true });
+                        await fsp.rename(src, dst);
+                    }
+                    if (relDir === '.' || fs.existsSync(dst)) {
+                        system = expectedSystem;
+                        modified = true;
+                    }
+                } catch {
+                    // Si no se puede mover, se mantiene la ubicación actual.
+                }
+            }
+        }
+
+        const execRel = actualRel.split('/').slice(1).join('/');
+        const key = `${system.toLowerCase()}|${execRel.toLowerCase()}`;
+        if (seenEntries.has(key)) {
+            modified = true;
+            continue;
+        }
+        seenEntries.add(key);
+
+        if (game.system !== system || game.executableFile !== execRel) {
+            game.system = system;
+            game.executableFile = execRel;
+            game.coverUrl = buildCoverUrl(system, game.title) || game.coverUrl;
+            modified = true;
+        }
+
+        const launch = system === 'PS1'
+            ? { emulator: 'retroarch', core: 'swanstation_libretro.dll' }
+            : { emulator: profile.emulator, core: profile.core };
+        if (launch.emulator && (game.emulator !== launch.emulator || game.core !== launch.core)) {
+            game.emulator = launch.emulator;
+            game.core = launch.core;
+            modified = true;
+        }
+
+        nextCatalog.push(game);
     }
 
-    return catalog.map((game) => {
+    if (modified) {
+        await writeCatalog(nextCatalog);
+    }
+
+    return nextCatalog.map((game) => {
         const romFullPath = path.join(GAMES_DIR, game.system.toLowerCase(), game.executableFile);
         return { ...game, installed: fs.existsSync(romFullPath) };
     });
@@ -216,21 +514,22 @@ async function saveGameToCatalog(gameEntry) {
 async function deleteGameFromCatalog(gameId) {
     const catalog = await readCatalog();
     const game = catalog.find((g) => g.id === gameId);
-    if (game) {
-        const gameFolder = resolveInside(
-            GAMES_DIR,
-            game.system.toLowerCase(),
-            path.dirname(game.executableFile)
-        );
+    if (!game) return false;
+
+    const relDir = path.dirname(game.executableFile);
+    if (relDir !== '.') {
+        const gameFolder = resolveInside(GAMES_DIR, game.system.toLowerCase(), relDir);
         const sysRoot = resolveInside(GAMES_DIR, game.system.toLowerCase());
         if (gameFolder !== sysRoot) {
             await fsp.rm(gameFolder, { recursive: true, force: true }).catch(() => { });
-        } else {
-            const singleFile = resolveInside(GAMES_DIR, game.system.toLowerCase(), game.executableFile);
-            await fsp.rm(singleFile, { force: true }).catch(() => { });
         }
+    } else {
+        const singleFile = resolveInside(GAMES_DIR, game.system.toLowerCase(), game.executableFile);
+        await fsp.rm(singleFile, { force: true }).catch(() => { });
     }
+
     await writeCatalog(catalog.filter((g) => g.id !== gameId));
+    return true;
 }
 
 // --- Eventos SSE ---
@@ -446,13 +745,21 @@ async function ensureRetroArchAutoControls(retroarchDir) {
     const coreOptPath = path.join(coreOptDir, 'SwanStation.opt');
 
     const autoSettings = {
-        // Ventana redimensionable
+        // Ventana redimensionable a mayor tamaño (escala 4x)
         video_fullscreen: '"false"',
         video_windowed_fullscreen: '"false"',
         video_window_show_decorations: '"true"',
         video_window_save_positions: '"true"',
         video_window_custom_size_enable: '"false"',
-        video_scale: '"3"',
+        video_scale: '"4"',
+        // Calidad de imagen HD: suavizado y escalado sin pixelado forzado
+        video_smooth: '"true"',
+        video_threaded: '"true"',
+        video_vsync: '"true"',
+        video_scale_integer: '"false"',
+        video_shader_enable: '"false"',
+        video_crop_overscan: '"true"',
+        video_aspect_ratio: '"4:3"',
         // Cursor oculto dentro de RetroArch
         input_mouse_hide_enable: '"true"',
         input_auto_mouse_grab: '"false"',
@@ -513,12 +820,27 @@ async function ensureRetroArchAutoControls(retroarchDir) {
 
     await fsp.writeFile(cfgPath, content.trim() + '\n', 'utf-8');
 
-    // SwanStation (PS1): Activar mando DualShock con ambos sticks activos
+    // SwanStation (PS1): mando DualShock + renderizado en HD (4x) con PGXP.
+    // Si tu PC puede más, sube swanstation_GPU_ResolutionScale a 5, 6 u 8.
     await fsp.mkdir(coreOptDir, { recursive: true });
     let optContent = fs.existsSync(coreOptPath) ? await fsp.readFile(coreOptPath, 'utf-8') : '';
     const ps1Opts = {
         duckstation_Controller1_Type: '"AnalogController"',
-        duckstation_Controller1_ForceAnalogOnReset: '"true"'
+        duckstation_Controller1_ForceAnalogOnReset: '"true"',
+        swanstation_GPU_ResolutionScale: '"4"',
+        swanstation_GPU_TextureFilter: '"Bilinear"',
+        swanstation_GPU_PGXPEnable: '"true"',
+        swanstation_GPU_PGXPPreserveProjFP: '"true"',
+        swanstation_GPU_PGXPTextureCorrection: '"true"',
+        swanstation_GPU_PGXPVertexCache: '"true"',
+        swanstation_GPU_PGXPDepthBuffer: '"true"',
+        swanstation_GPU_TrueColor: '"true"',
+        swanstation_GPU_ScaledDithering: '"true"',
+        swanstation_GPU_DisableInterlacing: '"true"',
+        swanstation_GPU_Renderer: '"Auto"',
+        swanstation_Display_AspectRatio: '"4:3"',
+        swanstation_Display_CropMode: '"Overscan"',
+        swanstation_CPU_Overclock: '"100"'
     };
 
     for (const [key, value] of Object.entries(ps1Opts)) {
@@ -532,8 +854,179 @@ async function ensureRetroArchAutoControls(retroarchDir) {
     await fsp.writeFile(coreOptPath, optContent.trim() + '\n', 'utf-8');
 }
 
+// --- Configuración Inicial y Estado de Emuladores ---
+const PS1_BIOS_NAMES = ['scph5500.bin', 'scph5501.bin', 'scph5502.bin', 'scph7001.bin', 'scph7002.bin', 'scph7003.bin', 'scph1001.bin', 'scph101.bin', 'ps1_rom.bin'];
+const PS2_BIOS_PATTERN = /^scph[\w.-]*\.bin$/i;
+const STATUS_CORES = {
+    PS1: 'swanstation_libretro.dll',
+    SNES: 'snes9x_libretro.dll',
+    NES: 'nestopia_libretro.dll',
+    N64: 'mupen64plus_next_libretro.dll',
+    GB: 'gambatte_libretro.dll',
+    GBC: 'gambatte_libretro.dll',
+    GBA: 'mgba_libretro.dll',
+    NDS: 'melonds_libretro.dll',
+    GENESIS: 'genesis_plus_gx_libretro.dll'
+};
+
+async function listFilesLower(dir) {
+    const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
+    return entries.filter((entry) => entry.isFile()).map((entry) => entry.name.toLowerCase());
+}
+
+async function findPs1Bios() {
+    const roots = [
+        path.join(EMULATORS_DIR, 'retroarch', 'system'),
+        path.join(EMULATORS_DIR, 'retroarch'),
+        PCSX2_BIOS_DIR
+    ];
+    for (const root of roots) {
+        const files = await listFilesLower(root);
+        const found = files.find((name) => PS1_BIOS_NAMES.includes(name));
+        if (found) return { found: true, name: found, dir: root };
+    }
+    return { found: false, name: null, dir: roots[0] };
+}
+
+async function findPs2Bios() {
+    const files = await listFilesLower(PCSX2_BIOS_DIR);
+    const matches = files.filter((name) => PS2_BIOS_PATTERN.test(name));
+    return { found: matches.length > 0, files: matches, dir: PCSX2_BIOS_DIR };
+}
+
+// PCSX2 guarda su configuración en Documentos. La primera vez copiamos la
+// plantilla ya optimizada (3x, FXAA, mando Xbox) sin pisar la del usuario.
+async function ensurePcsx2FirstRunConfig() {
+    const folders = ['bios', 'cache', 'cheats', 'covers', 'gamesettings', 'inis', 'inputprofiles', 'logs', 'memcards', 'patches', 'resources', 'snaps', 'sstates', 'textures', 'videos'];
+    for (const folder of folders) {
+        await fsp.mkdir(path.join(PCSX2_DATA_DIR, folder), { recursive: true }).catch(() => {});
+    }
+
+    if (fs.existsSync(PCSX2_INI_PATH)) return false;
+
+    const templatePath = path.join(CONFIG_TEMPLATES_DIR, 'PCSX2.ini');
+    if (!fs.existsSync(templatePath)) return false;
+
+    let ini = await fsp.readFile(templatePath, 'utf-8');
+    // La plantilla se distribuye sin rutas absolutas ni un BIOS concreto.
+    ini = ini.replace(/^Bios\s*=.*$/m, 'Bios = bios');
+    ini = ini.replace(/^BIOS\s*=.*$/m, 'BIOS =');
+    await fsp.writeFile(PCSX2_INI_PATH, ini.trim() + '\n', 'utf-8');
+    return true;
+}
+
+// Dolphin solo usa su carpeta "User" junto al ejecutable si existe portable.txt.
+async function ensureDolphinPortableMode() {
+    const dolphinDir = path.join(EMULATORS_DIR, 'dolphin');
+    if (!fs.existsSync(path.join(dolphinDir, 'Dolphin.exe'))) return false;
+    const flagPath = path.join(dolphinDir, 'portable.txt');
+    if (!fs.existsSync(flagPath)) {
+        await fsp.writeFile(flagPath, 'MegaRetro Hub: modo portable\r\n', 'utf-8');
+        return true;
+    }
+    return false;
+}
+
+async function buildEmulatorStatus() {
+    const retroarchDir = path.join(EMULATORS_DIR, 'retroarch');
+    const retroarchBin = path.join(retroarchDir, 'retroarch.exe');
+    const coreFiles = await listFilesLower(path.join(retroarchDir, 'cores'));
+    const missingCores = Object.values(STATUS_CORES).filter((core) => !coreFiles.includes(core));
+    const ps1Bios = await findPs1Bios();
+    const ps2Bios = await findPs2Bios();
+    const pcsx2Bin = findPcsx2Executable();
+    const dolphinBin = [path.join(EMULATORS_DIR, 'dolphin', 'Dolphin.exe')].find((candidate) => fs.existsSync(candidate)) || null;
+
+    const systems = [
+        {
+            id: 'PS1',
+            label: 'PlayStation 1',
+            emulator: 'RetroArch (SwanStation)',
+            ready: fs.existsSync(retroarchBin) && coreFiles.includes(STATUS_CORES.PS1),
+            note: ps1Bios.found ? 'BIOS detectada' : 'Funciona sin BIOS, pero se recomienda añadir una BIOS de tu consola'
+        },
+        {
+            id: 'PS2',
+            label: 'PlayStation 2',
+            emulator: 'PCSX2',
+            ready: Boolean(pcsx2Bin) && ps2Bios.found,
+            note: ps2Bios.found ? 'BIOS detectada' : 'Necesita una BIOS de PS2 (scphXXXXX.bin) en Documentos\\PCSX2\\bios'
+        },
+        {
+            id: 'GC',
+            label: 'GameCube',
+            emulator: 'Dolphin',
+            ready: Boolean(dolphinBin),
+            note: dolphinBin ? 'Listo para jugar' : 'Dolphin no encontrado'
+        },
+        {
+            id: 'RETRO',
+            label: 'SNES / NES / N64 / GB / GBC / GBA / NDS / Mega Drive',
+            emulator: 'RetroArch',
+            ready: fs.existsSync(retroarchBin) && missingCores.length === 0,
+            note: missingCores.length === 0 ? 'Todos los núcleos instalados' : `Faltan núcleos: ${missingCores.join(', ')}`
+        }
+    ];
+
+    return {
+        packaged: PACKAGED,
+        dataDir: DATA_DIR,
+        gamesDir: GAMES_DIR,
+        downloadsDir: DOWNLOADS_DIR,
+        emulators: {
+            retroarch: { installed: fs.existsSync(retroarchBin), dir: retroarchDir, missingCores },
+            pcsx2: { installed: Boolean(pcsx2Bin), dir: pcsx2Bin ? path.dirname(pcsx2Bin) : path.join(EMULATORS_DIR, 'pcsx2'), configPrepared: fs.existsSync(PCSX2_INI_PATH) },
+            dolphin: { installed: Boolean(dolphinBin), dir: path.join(EMULATORS_DIR, 'dolphin'), portable: fs.existsSync(path.join(EMULATORS_DIR, 'dolphin', 'portable.txt')) }
+        },
+        bios: {
+            ps1: ps1Bios,
+            ps2: ps2Bios
+        },
+        systems
+    };
+}
+
+const OPENABLE_FOLDERS = {
+    data: () => DATA_DIR,
+    games: () => GAMES_DIR,
+    downloads: () => DOWNLOADS_DIR,
+    emulators: () => EMULATORS_DIR,
+    'ps2-bios': () => PCSX2_BIOS_DIR
+};
+
+function openFolder(target) {
+    const resolveDir = OPENABLE_FOLDERS[target];
+    if (!resolveDir) throw new Error('Carpeta no válida');
+    const dir = resolveDir();
+    fs.mkdirSync(dir, { recursive: true });
+    if (process.platform === 'win32') {
+        spawn('explorer.exe', [dir], { shell: false, detached: true, windowsHide: true }).unref();
+    } else if (process.platform === 'darwin') {
+        spawn('open', [dir], { shell: false, detached: true }).unref();
+    } else {
+        spawn('xdg-open', [dir], { shell: false, detached: true }).unref();
+    }
+    return dir;
+}
+
 // --- Ejecución de Emulador ---
 let activeEmulatorProcess = null;
+let activeGameInfo = null;
+
+function findPcsx2Executable() {
+    const candidates = [
+        path.join(EMULATORS_DIR, 'pcsx2', 'pcsx2-qt.exe'),
+        path.join(EMULATORS_DIR, 'pcsx2', 'pcsx2.exe'),
+        'C:\\Program Files\\PCSX2\\pcsx2-qt.exe',
+        'C:\\Program Files (x86)\\PCSX2\\pcsx2-qt.exe'
+    ];
+    if (process.env.LOCALAPPDATA) {
+        candidates.push(
+            path.join(process.env.LOCALAPPDATA, 'Programs', 'PCSX2', 'pcsx2-qt.exe')
+        );
+    }
+    return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
 
 async function launchGameById(gameId) {
     if (activeEmulatorProcess) {
@@ -568,23 +1061,40 @@ async function launchGameById(gameId) {
         }
         args = ['-L', corePath, romPath];
     } else if (game.emulator === 'pcsx2') {
-        cwd = resolveInside(EMULATORS_DIR, 'pcsx2');
-        bin = resolveInside(cwd, 'pcsx2-qt.exe');
+        bin = findPcsx2Executable();
+        if (!bin) {
+            throw new Error(
+                'No se encontró PCSX2. Instálalo en emulators/pcsx2/ (pcsx2-qt.exe) o en Program Files/PCSX2.'
+            );
+        }
+        cwd = path.dirname(bin);
         args = ['-batch', romPath];
     } else if (game.emulator === 'dolphin') {
-        cwd = resolveInside(EMULATORS_DIR, 'dolphin');
-        bin = resolveInside(cwd, 'Dolphin.exe');
+        const dolphinCandidates = [
+            path.join(EMULATORS_DIR, 'dolphin', 'Dolphin.exe'),
+            'C:\\Program Files\\Dolphin\\Dolphin.exe',
+            'C:\\Program Files (x86)\\Dolphin\\Dolphin.exe'
+        ];
+        bin = dolphinCandidates.find((candidate) => fs.existsSync(candidate)) || null;
+        if (!bin) {
+            throw new Error(
+                'No se encontró Dolphin. Instálalo en emulators/dolphin/ (Dolphin.exe).'
+            );
+        }
+        cwd = path.dirname(bin);
         args = ['-e', romPath];
     } else {
         throw new Error(`Emulador no soportado: ${game.emulator}`);
     }
 
+    activeGameInfo = { gameId: game.id, title: game.title };
     publishEvent({ type: 'GAME_STARTED', gameId: game.id, title: game.title });
 
     activeEmulatorProcess = spawn(bin, args, { cwd, shell: false, detached: false });
 
     activeEmulatorProcess.on('close', () => {
         activeEmulatorProcess = null;
+        activeGameInfo = null;
         stopMouseToRightStickBridge();
         setTimeout(() => {
             publishEvent({ type: 'GAME_CLOSED', gameId: game.id });
@@ -593,11 +1103,34 @@ async function launchGameById(gameId) {
 
     activeEmulatorProcess.on('error', (err) => {
         activeEmulatorProcess = null;
+        activeGameInfo = null;
         stopMouseToRightStickBridge();
         publishEvent({ type: 'GAME_ERROR', message: `Error al abrir emulador: ${err.message}` });
     });
 
     return { launched: true, title: game.title };
+}
+
+function stopActiveGame() {
+    const proc = activeEmulatorProcess;
+    if (!proc || proc.pid == null) {
+        activeGameInfo = null;
+        publishEvent({ type: 'GAME_CLOSED' });
+        return false;
+    }
+
+    try {
+        if (process.platform === 'win32') {
+            // taskkill /T cierra también los procesos hijos del emulador.
+            spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { shell: false });
+        } else {
+            proc.kill('SIGTERM');
+        }
+    } catch {
+        // El evento 'close' del proceso limpiará el estado igualmente.
+    }
+
+    return true;
 }
 
 // --- Extracción e Importación Automática (ZIP / 7z / ROMs) ---
@@ -606,8 +1139,32 @@ let expectedSystem = null;
 let radarActive = false;
 let shutdownTimer = null;
 
+function find7ZipBinary() {
+    const candidates = [
+        process.env.ProgramFiles && path.join(process.env.ProgramFiles, '7-Zip', '7z.exe'),
+        process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], '7-Zip', '7z.exe'),
+        'C:\\Program Files\\7-Zip\\7z.exe',
+        'C:\\Program Files (x86)\\7-Zip\\7z.exe'
+    ].filter(Boolean);
+    return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+async function extractWith7Zip(archivePath, destDir) {
+    const bin = find7ZipBinary();
+    if (!bin) throw new Error('7-Zip no está instalado');
+
+    await new Promise((resolve, reject) => {
+        const proc = spawn(bin, ['x', '-y', `-o${destDir}`, archivePath], { shell: false, windowsHide: true });
+        let errOut = '';
+        proc.stderr?.on('data', (d) => (errOut += d.toString()));
+        proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(errOut || `7z exit ${code}`))));
+        proc.on('error', reject);
+    });
+}
+
 async function extractArchiveSafely(archivePath, destDir) {
     const is7z = archivePath.toLowerCase().endsWith('.7z');
+    let tarError = null;
 
     try {
         await new Promise((resolve, reject) => {
@@ -620,8 +1177,18 @@ async function extractArchiveSafely(archivePath, destDir) {
         const extracted = await walkFiles(destDir);
         if (extracted.length > 0) return;
     } catch (err) {
-        if (is7z) {
-            throw new Error(`No se pudo extraer el archivo .7z: ${err.message}`);
+        tarError = err;
+    }
+
+    if (is7z) {
+        try {
+            await extractWith7Zip(archivePath, destDir);
+            const extracted = await walkFiles(destDir);
+            if (extracted.length > 0) return;
+        } catch (sevenZipError) {
+            throw new Error(
+                `No se pudo extraer el archivo .7z (${tarError?.message || 'tar no lo soporta'} / ${sevenZipError.message})`
+            );
         }
     }
 
@@ -643,6 +1210,7 @@ async function importDownloadedFile(sourcePath, silentIfNoRom = false) {
     activeImports.add(sourcePath);
 
     const stagingDir = path.join(GAMES_DIR, `.staging_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+    let filename = path.basename(sourcePath);
 
     try {
         let stableCount = 0;
@@ -669,7 +1237,7 @@ async function importDownloadedFile(sourcePath, silentIfNoRom = false) {
             }
         }
 
-        const filename = path.basename(sourcePath);
+        filename = path.basename(sourcePath);
         const sourceDir = path.dirname(sourcePath);
         const extLower = path.extname(filename).toLowerCase();
         const isArchive = ARCHIVE_EXTS.includes(extLower);
@@ -700,26 +1268,56 @@ async function importDownloadedFile(sourcePath, silentIfNoRom = false) {
         }
 
         const allFiles = await walkFiles(stagingDir);
-        const romFile =
-            allFiles.find((f) => ['.cue', '.chd'].includes(path.extname(f).toLowerCase())) ||
-            allFiles.find((f) => EXT_PROFILES[path.extname(f).toLowerCase()]);
 
-        if (!romFile) {
-            throw new Error('El archivo comprimido no contiene una ROM compatible.');
+        // Elige la ROM principal ignorando README.md, manuales, etc.
+        const candidates = [];
+        for (const file of allFiles) {
+            const ext = path.extname(file).toLowerCase();
+            if (!ROM_EXTS.has(ext)) continue;
+            if (!(await isLikelyRomFile(file, ext))) continue;
+            candidates.push({ file, ext });
         }
 
-        const romExt = path.extname(romFile).toLowerCase();
+        const priority = ['.cue', '.m3u', '.chd', '.iso', '.bin', '.img'];
+        candidates.sort((a, b) => {
+            const pa = priority.indexOf(a.ext);
+            const pb = priority.indexOf(b.ext);
+            return (pa === -1 ? 99 : pa) - (pb === -1 ? 99 : pb);
+        });
+
+        let romFile = candidates[0]?.file || null;
+        if (!romFile) {
+            throw new Error('El archivo no contiene una ROM de juego compatible.');
+        }
+
+        let romExt = path.extname(romFile).toLowerCase();
+
+        // Descargas de PS1 que vienen como .bin suelto (sin .cue): se genera el .cue.
+        if (romExt === '.bin') {
+            romFile = await ensureCueForBin(romFile);
+            romExt = '.cue';
+        }
+
         const profile = EXT_PROFILES[romExt];
-        const system = expectedSystem || profile.system;
+        const system = resolveSystemForExtension(
+            romExt,
+            expectedSystem || EXT_PROFILES[path.extname(candidates[0].file).toLowerCase()]?.system || null
+        );
         const cleanTitle = path.parse(romFile).name.replace(/\s*[\(\[].*?[\)\]]/g, '').trim();
         const slug = sanitizeSlug(cleanTitle);
+
+        const gameFiles = await collectGameFiles(allFiles, romFile);
+        if (gameFiles.length === 0) {
+            throw new Error('No se encontraron los archivos del juego.');
+        }
 
         const targetDir = resolveInside(GAMES_DIR, system.toLowerCase(), slug);
         await fsp.mkdir(targetDir, { recursive: true });
 
         let totalBytes = 0;
-        for (const srcFile of allFiles) {
-            const stat = await fsp.stat(srcFile);
+        for (const srcFile of gameFiles) {
+            const stat = await fsp.stat(srcFile).catch(() => null);
+            if (!stat) continue;
             totalBytes += stat.size;
             const destFile = resolveInside(targetDir, path.basename(srcFile));
             await fsp.rm(destFile, { force: true }).catch(() => { });
@@ -730,7 +1328,9 @@ async function importDownloadedFile(sourcePath, silentIfNoRom = false) {
             throw new Error('El archivo .cue no venía acompañado de su archivo .bin completo.');
         }
 
-        const coverUrl = `https://thumbnails.libretro.com/${encodeURIComponent(profile.dir)}/Named_Boxarts/${encodeURIComponent(cleanTitle + ' (USA)')}.png`;
+        const launch = system === 'PS1'
+            ? { emulator: 'retroarch', core: 'swanstation_libretro.dll' }
+            : { emulator: profile.emulator, core: profile.core };
 
         const savedGame = await saveGameToCatalog({
             id: `${system.toLowerCase()}-${slug}-${Date.now().toString(36)}`,
@@ -738,9 +1338,9 @@ async function importDownloadedFile(sourcePath, silentIfNoRom = false) {
             system,
             year: new Date().getFullYear(),
             sizeMB: +(totalBytes / 1048576).toFixed(1),
-            emulator: system === 'PS1' ? 'retroarch' : profile.emulator,
-            core: system === 'PS1' ? 'swanstation_libretro.dll' : profile.core,
-            coverUrl,
+            emulator: launch.emulator,
+            core: launch.core,
+            coverUrl: buildCoverUrl(system, cleanTitle),
             executableFile: path.posix.join(slug, path.basename(romFile))
         });
 
@@ -750,8 +1350,12 @@ async function importDownloadedFile(sourcePath, silentIfNoRom = false) {
 
         publishEvent({ type: 'GAME_IMPORTED', game: { ...savedGame, installed: true } });
     } catch (err) {
-        if (!silentIfNoRom || !err.message.includes('no contiene una ROM compatible')) {
-            publishEvent({ type: 'ERROR_TOAST', message: err.message });
+        const noRomError = err.message.includes('no contiene una ROM') || err.message.includes('no contiene una ROM de juego');
+        if (!silentIfNoRom || !noRomError) {
+            publishEvent({
+                type: 'ERROR_TOAST',
+                message: `No se pudo importar "${filename}": ${err.message}`
+            });
         }
     } finally {
         activeImports.delete(sourcePath);
@@ -767,7 +1371,8 @@ function startDownloadsRadar() {
         if (lower.endsWith('.crdownload') || lower.endsWith('.part') || lower.endsWith('.tmp')) return;
 
         const ext = path.extname(lower);
-        if (!ARCHIVE_EXTS.includes(ext) && !EXT_PROFILES[ext]) return;
+        if (!ARCHIVE_EXTS.includes(ext) && !ROM_EXTS.has(ext)) return;
+        if (isJunkDownloadName(filename)) return;
 
         const fullPath = path.join(DOWNLOADS_DIR, filename);
         if (fs.existsSync(fullPath)) {
@@ -822,10 +1427,10 @@ function openExternalBrowser(url) {
 // --- Servidor HTTP ---
 function applySecurityHeaders(req, res) {
     const origin = req.headers.origin;
-    const allowed = ['http://localhost:3333', 'http://127.0.0.1:3333'];
+    const allowed = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
     res.setHeader(
         'Access-Control-Allow-Origin',
-        origin && allowed.includes(origin) ? origin : 'http://localhost:3333'
+        origin && allowed.includes(origin) ? origin : `http://localhost:${PORT}`
     );
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
@@ -918,6 +1523,12 @@ const server = http.createServer(async (req, res) => {
                 Connection: 'keep-alive'
             });
             res.write(`data: ${JSON.stringify({ type: 'CONNECTED' })}\n\n`);
+            if (activeGameInfo) {
+                res.write(`data: ${JSON.stringify({ type: 'GAME_STARTED', ...activeGameInfo })}\n\n`);
+            } else {
+                // Sincroniza clientes que se reconectan y limpia overlays obsoletos.
+                res.write(`data: ${JSON.stringify({ type: 'GAME_CLOSED' })}\n\n`);
+            }
             if (radarActive) {
                 res.write(`data: ${JSON.stringify({ type: 'WATCHER_STATUS', active: true, system: expectedSystem })}\n\n`);
             }
@@ -939,6 +1550,20 @@ const server = http.createServer(async (req, res) => {
             return sendJson(req, res, 200, games);
         }
 
+        if (req.method === 'GET' && pathname === '/api/health') {
+            return sendJson(req, res, 200, { ok: true, port: PORT, packaged: PACKAGED, pid: process.pid });
+        }
+
+        if (req.method === 'GET' && pathname === '/api/status') {
+            return sendJson(req, res, 200, await buildEmulatorStatus());
+        }
+
+        if (req.method === 'POST' && pathname === '/api/system/open-folder') {
+            const { target } = await readBody(req);
+            const dir = openFolder(target);
+            return sendJson(req, res, 200, { opened: true, dir });
+        }
+
         if (req.method === 'GET' && pathname === '/api/sources') {
             try {
                 const raw = await fsp.readFile(SOURCES_PATH, 'utf-8');
@@ -954,9 +1579,17 @@ const server = http.createServer(async (req, res) => {
             return sendJson(req, res, 200, result);
         }
 
+        if (req.method === 'POST' && pathname === '/api/game/stop') {
+            const stopped = stopActiveGame();
+            return sendJson(req, res, 200, { stopped });
+        }
+
         if (req.method === 'DELETE' && pathname.startsWith('/api/game/')) {
             const gameId = decodeURIComponent(pathname.replace('/api/game/', ''));
-            await deleteGameFromCatalog(gameId);
+            const deleted = await deleteGameFromCatalog(gameId);
+            if (!deleted) {
+                return sendJson(req, res, 404, { error: 'El juego ya no existe en la biblioteca' });
+            }
             publishEvent({ type: 'GAME_DELETED', gameId });
             return sendJson(req, res, 200, { deleted: true });
         }
@@ -979,21 +1612,39 @@ const server = http.createServer(async (req, res) => {
 
         if (req.method === 'POST' && pathname === '/api/radar/scan') {
             if (!fs.existsSync(DOWNLOADS_DIR)) {
-                return sendJson(req, res, 200, { found: 0 });
+                return sendJson(req, res, 200, { found: 0, names: [] });
             }
-            const entries = await fsp.readdir(DOWNLOADS_DIR);
-            let found = 0;
-            for (const name of entries) {
+
+            const entries = await fsp.readdir(DOWNLOADS_DIR, { withFileTypes: true });
+            const names = [];
+            const ignored = [];
+            const maxAgeMs = 7 * 24 * 60 * 60 * 1000;
+
+            for (const entry of entries) {
+                if (!entry.isFile()) continue;
+                const name = entry.name;
                 const ext = path.extname(name).toLowerCase();
-                if (!ARCHIVE_EXTS.includes(ext) && !EXT_PROFILES[ext]) continue;
+                if (!ARCHIVE_EXTS.includes(ext) && !ROM_EXTS.has(ext)) continue;
+                if (isJunkDownloadName(name)) {
+                    ignored.push(name);
+                    continue;
+                }
+
                 const fullPath = path.join(DOWNLOADS_DIR, name);
                 const st = await fsp.stat(fullPath).catch(() => null);
-                if (st && st.isFile()) {
-                    found++;
-                    importDownloadedFile(fullPath, true);
+                if (!st || !st.isFile()) continue;
+
+                // Ignora archivos viejos que el usuario ya tenía olvidados en Descargas.
+                if (Date.now() - st.mtimeMs > maxAgeMs) {
+                    ignored.push(name);
+                    continue;
                 }
+
+                names.push(name);
+                importDownloadedFile(fullPath, false);
             }
-            return sendJson(req, res, 200, { found });
+
+            return sendJson(req, res, 200, { found: names.length, names, ignored });
         }
 
         await serveStatic(req, res, pathname);
@@ -1004,14 +1655,23 @@ const server = http.createServer(async (req, res) => {
 
 process.on('exit', stopMouseToRightStickBridge);
 
+// Primer inicio: prepara carpetas y configuración de emuladores sin pisar
+// ajustes existentes del usuario.
+const createdPcsx2Config = await ensurePcsx2FirstRunConfig().catch(() => false);
+const createdDolphinFlag = await ensureDolphinPortableMode().catch(() => false);
+if (createdPcsx2Config) console.log('Configuración inicial de PCSX2 copiada a Documentos\\PCSX2');
+if (createdDolphinFlag) console.log('Dolphin activado en modo portable');
+
 await fsp.mkdir(GAMES_DIR, { recursive: true });
 const initialGames = await syncGamesFromDisk();
 console.log(`Juegos detectados en disco: ${initialGames.length}`);
+console.log(`Carpeta de datos: ${DATA_DIR}`);
+console.log(`Emuladores: ${EMULATORS_DIR}`);
 startDownloadsRadar();
 
 server.listen(PORT, () => {
     console.log(`MegaRetro Hub activo en http://localhost:${PORT}`);
-    if (process.argv.includes('--app')) {
+    if (process.argv.includes('--app') && !process.env.MEGARETRO_DESKTOP) {
         setTimeout(() => {
             openDesktopWindow(`http://localhost:${PORT}`);
         }, 400);

@@ -14,6 +14,31 @@ export interface RetroGame {
   progress?: number;
 }
 
+export interface SystemRequirement {
+  id: string;
+  label: string;
+  emulator: string;
+  ready: boolean;
+  note: string;
+}
+
+export interface SystemStatus {
+  packaged: boolean;
+  dataDir: string;
+  gamesDir: string;
+  downloadsDir: string;
+  emulators: {
+    retroarch: { installed: boolean; dir: string; missingCores: string[] };
+    pcsx2: { installed: boolean; dir: string; configPrepared: boolean };
+    dolphin: { installed: boolean; dir: string; portable: boolean };
+  };
+  bios: {
+    ps1: { found: boolean; name: string | null; dir: string };
+    ps2: { found: boolean; files: string[]; dir: string };
+  };
+  systems: SystemRequirement[];
+}
+
 export interface LauncherEvent {
   type:
     | 'CONNECTED'

@@ -1,7 +1,15 @@
 import { Injectable, signal, OnDestroy, inject, PLATFORM_ID } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
 
-export type GamepadAction = 'UP' | 'DOWN' | 'LEFT' | 'RIGHT' | 'CONFIRM' | 'BACK' | 'DELETE';
+export type GamepadAction =
+  | 'UP'
+  | 'DOWN'
+  | 'LEFT'
+  | 'RIGHT'
+  | 'CONFIRM'
+  | 'BACK'
+  | 'DELETE'
+  | 'EXIT';
 
 @Injectable({ providedIn: 'root' })
 export class GamepadService implements OnDestroy {
@@ -93,13 +101,17 @@ export class GamepadService implements OnDestroy {
     const axisY = pad.axes[1] ?? 0;
     const deadzone = 0.55;
 
+    // Select + Start: salir del juego y volver al Hub.
+    if (btn(8) && btn(9)) return 'EXIT';
+
     if (btn(12) || axisY < -deadzone) return 'UP';
     if (btn(13) || axisY > deadzone) return 'DOWN';
     if (btn(14) || axisX < -deadzone) return 'LEFT';
     if (btn(15) || axisX > deadzone) return 'RIGHT';
-    if (btn(0) || btn(9)) return 'CONFIRM'; // A / Cruz / Start
-    if (btn(1)) return 'BACK';               // B / Círculo
-    if (btn(3)) return 'DELETE';             // Y / Triángulo
+    // Solo A inicia el juego: Start por sí solo ya no lanza nada al conectar el mando.
+    if (btn(0)) return 'CONFIRM'; // A / Cruz
+    if (btn(1)) return 'BACK';    // B / Círculo
+    if (btn(3)) return 'DELETE';  // Y / Triángulo
     return null;
   }
 
